@@ -15,7 +15,7 @@ if not TOKEN:
     print("❌ Ошибка: переменная окружения BOT_TOKEN не установлена.")
     exit(1)
 
-LOG_CHANNEL_ID = 1462418981825810535  # Канал для всех логов
+LOG_CHANNEL_ID = 1462418981825810535
 
 intents = disnake.Intents.default()
 intents.members = True
@@ -33,6 +33,8 @@ db.execute("PRAGMA journal_mode=WAL")
 db.execute("PRAGMA synchronous=NORMAL")
 
 cur = db.cursor()
+
+# Создаём таблицы с правильной схемой (добавлена колонка created_at)
 cur.executescript("""
 CREATE TABLE IF NOT EXISTS giveaways (
     giveaway_id   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,9 +87,15 @@ CREATE TABLE IF NOT EXISTS reaction_roles (
 """)
 db.commit()
 
+# Проверяем, существует ли колонка created_at, если нет – добавляем
+try:
+    cur.execute("ALTER TABLE giveaways ADD COLUMN created_at INTEGER")
+    db.commit()
+except sqlite3.OperationalError:
+    pass  # колонка уже существует
+
 # ================= LOGGING =================
 async def log_to_channel(title: str, description: str, color: int = 0x00ff00, fields: list = None):
-    """Отправляет embed в лог-канал."""
     channel = bot.get_channel(LOG_CHANNEL_ID)
     if not channel:
         print(f"[WARN] Лог-канал {LOG_CHANNEL_ID} не найден")
@@ -164,7 +172,6 @@ async def on_member_join(member: disnake.Member):
         except Exception as e:
             print(f"[ERROR] Не удалось выдать роль: {e}")
 
-    # Отслеживаем инвайты
     guild = member.guild
     snapshot_before = {row["invite_code"]: row for row in cur.execute("SELECT * FROM invites_snapshot WHERE guild_id=?", (guild.id,)).fetchall()}
     try:
@@ -349,12 +356,12 @@ class GiveawayModal(ui.Modal):
         bot.add_view(view)
         await msg.edit(view=view)
         asyncio.create_task(schedule_end(gid))
-        await inter.edit_original_message(content=f"✅ Розыгрыш создан! ID: `{gid}`")
+        await inter.edit_original_message(content=f"✅ Розыгрыш создан! **ID: `{gid}`**")
 
-        # Лог в канал
+        # Лог с ID
         await log_to_channel(
             title="🎉 Создан розыгрыш",
-            description=f"**ID:** {gid}\n**Приз:** {prize}\n**Канал:** {inter.channel.mention}\n**Создал:** {inter.author.mention}\n**Завершится:** <t:{end_time}:F>",
+            description=f"**ID:** `{gid}`\n**Приз:** {prize}\n**Канал:** {inter.channel.mention}\n**Создал:** {inter.author.mention}\n**Завершится:** <t:{end_time}:F>",
             color=0x00ff00
         )
 
@@ -456,10 +463,9 @@ async def finish_giveaway(gid: int):
     except Exception:
         await channel.send(embed=embed)
 
-    # Лог в канал
     await log_to_channel(
         title="🏁 Розыгрыш завершён",
-        description=f"**ID:** {gid}\n**Приз:** {row['prize']}\n**Победители:** {winners_mentions}",
+        description=f"**ID:** `{gid}`\n**Приз:** {row['prize']}\n**Победители:** {winners_mentions}",
         color=0xffaa00
     )
 
@@ -652,27 +658,11 @@ async def list_giveaways(
 async def on_ready():
     await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Giveaways 🎉"))
 
-    # Сброс старых данных (инвайты и розыгрыши) при первом запуске
-    reset_invites = cur.execute("SELECT value FROM settings WHERE key='invites_reset_done'").fetchone()
-    if not reset_invites:
-        cur.execute("DELETE FROM invites")
-        cur.execute("DELETE FROM invites_snapshot")
-        cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('invites_reset_done', '1')")
-        db.commit()
-        await log_to_channel("🔄 Сброс инвайтов", "Старые данные по инвайтам удалены. Начинаем учёт с нуля.", color=0xff6600)
-
-    reset_giveaways = cur.execute("SELECT value FROM settings WHERE key='giveaways_reset_done'").fetchone()
-    if not reset_giveaways:
-        cur.execute("DELETE FROM giveaways")
-        cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('giveaways_reset_done', '1')")
-        db.commit()
-        await log_to_channel("🔄 Сброс розыгрышей", "Все старые розыгрыши удалены.", color=0xff6600)
-
-    # Синхронизация инвайтов
+    # Синхронизация инвайтов (снепшоты)
     for guild in bot.guilds:
         await sync_invites(guild)
 
-    # Восстановление активных розыгрышей
+    # Восстанавливаем активные розыгрыши
     active_rows = cur.execute("SELECT giveaway_id FROM giveaways WHERE status='active'").fetchall()
     for r in active_rows:
         gid = r["giveaway_id"]
