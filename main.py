@@ -306,7 +306,7 @@ def build_finished_giveaway_embed(prize, description, participants_count, winner
     end_ts = int(end_dt.timestamp())
     embed_banner = disnake.Embed(color=6776679)
     embed_banner.set_image(
-        url="https://cdn.discordapp.com/attachments/1527006158282555412/1529712107824611369/image.png?ex=6a62eeeb&is=6a619d6b&hm=56fadbbd813b5be5ff9fdf40b0f834dde9b3f90d6ff74054f224f8d23640a530&"
+        url="https://cdn.discordapp.com/attachments/1462418981825810535/1529721309880258660/image.png?ex=6a62f77d&is=6a61a5fd&hm=195de5a268f76548d304db161adc041513e051f0938fcb62588ccd6801e374b2&"
     )
 
     desc_text = (
@@ -711,7 +711,7 @@ async def list_giveaways(
 
 @bot.event
 async def on_ready():
-    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Призы и инвайты"))
+    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Приглашения и призы"))
 
     for guild in bot.guilds:
         await sync_invites(guild)
