@@ -125,7 +125,7 @@ async def on_ready():
         activity=disnake.Game("Giveaways 🎉")
     )
 
-    # Синхронизируем снепшоты инвайтов для отслеживания новых
+    # Синхронизируем снепшоты для всех гильдий
     for guild in bot.guilds:
         await sync_invites(guild)
 
