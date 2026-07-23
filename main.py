@@ -15,11 +15,13 @@ if not TOKEN:
     print("❌ Ошибка: переменная окружения BOT_TOKEN не установлена.")
     exit(1)
 
+LOG_CHANNEL_ID = 1462418981825810535  # Канал для всех логов
+
 intents = disnake.Intents.default()
 intents.members = True
 intents.guilds = True
 intents.invites = True
-intents.message_content = True  # для чтения содержимого сообщений (если нужно)
+intents.message_content = True
 
 bot = commands.InteractionBot(intents=intents)
 
@@ -83,6 +85,24 @@ CREATE TABLE IF NOT EXISTS reaction_roles (
 """)
 db.commit()
 
+# ================= LOGGING =================
+async def log_to_channel(title: str, description: str, color: int = 0x00ff00, fields: list = None):
+    """Отправляет embed в лог-канал."""
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+    if not channel:
+        print(f"[WARN] Лог-канал {LOG_CHANNEL_ID} не найден")
+        return
+    embed = disnake.Embed(title=title, description=description, color=color, timestamp=datetime.now(timezone.utc))
+    if fields:
+        for name, value, inline in fields:
+            embed.add_field(name=name, value=value, inline=inline)
+    try:
+        await channel.send(embed=embed)
+    except Exception as e:
+        print(f"[ERROR] Не удалось отправить лог: {e}")
+
+# ================= UTILS =================
+
 def now_ts():
     return int(datetime.now(timezone.utc).timestamp())
 
@@ -110,11 +130,10 @@ def parse_duration(duration_str: str):
         return timedelta(days=value)
 
 def parse_emoji(emoji_str: str):
-    """Парсит строку эмодзи в объект PartialEmoji или str."""
     try:
         return disnake.PartialEmoji.from_str(emoji_str)
     except Exception:
-        return emoji_str  # если не кастомный, просто вернуть строку
+        return emoji_str
 
 # ================= INVITE TRACKING =================
 
@@ -133,15 +152,19 @@ async def sync_invites(guild: disnake.Guild):
 # ================= AUTO-ROLE ON JOIN =================
 @bot.event
 async def on_member_join(member: disnake.Member):
-    # Выдаём основную роль
     role = member.guild.get_role(1127428607606796290)
     if role:
         try:
             await member.add_roles(role)
-            print(f"[INFO] Выдана роль {role.name} пользователю {member}")
+            await log_to_channel(
+                title="👤 Автороль выдана",
+                description=f"Пользователь {member.mention} получил роль {role.mention}",
+                color=0x00aaff
+            )
         except Exception as e:
             print(f"[ERROR] Не удалось выдать роль: {e}")
-    # Отслеживаем инвайты (старая логика)
+
+    # Отслеживаем инвайты
     guild = member.guild
     snapshot_before = {row["invite_code"]: row for row in cur.execute("SELECT * FROM invites_snapshot WHERE guild_id=?", (guild.id,)).fetchall()}
     try:
@@ -167,52 +190,6 @@ async def on_member_join(member: disnake.Member):
                 (guild.id, inviter_id, member.id, joined_at, is_bot))
     db.commit()
 
-# ================= REACTION ROLE EVENTS =================
-@bot.event
-async def on_raw_reaction_add(payload: disnake.RawReactionActionEvent):
-    if payload.member is None or payload.member.bot:
-        return
-    guild = bot.get_guild(payload.guild_id)
-    if not guild:
-        return
-    # Проверяем, есть ли такая реакция в таблице
-    row = cur.execute(
-        "SELECT role_id FROM reaction_roles WHERE guild_id=? AND channel_id=? AND message_id=? AND emoji=?",
-        (payload.guild_id, payload.channel_id, payload.message_id, str(payload.emoji))
-    ).fetchone()
-    if row:
-        role = guild.get_role(row["role_id"])
-        if role:
-            try:
-                await payload.member.add_roles(role)
-                print(f"[REACTION] Выдана роль {role.name} пользователю {payload.member}")
-            except Exception as e:
-                print(f"[ERROR] Не удалось выдать роль: {e}")
-
-@bot.event
-async def on_raw_reaction_remove(payload: disnake.RawReactionActionEvent):
-    if payload.user_id == bot.user.id:
-        return
-    guild = bot.get_guild(payload.guild_id)
-    if not guild:
-        return
-    row = cur.execute(
-        "SELECT role_id FROM reaction_roles WHERE guild_id=? AND channel_id=? AND message_id=? AND emoji=?",
-        (payload.guild_id, payload.channel_id, payload.message_id, str(payload.emoji))
-    ).fetchone()
-    if row:
-        role = guild.get_role(row["role_id"])
-        if role:
-            member = guild.get_member(payload.user_id)
-            if member:
-                try:
-                    await member.remove_roles(role)
-                    print(f"[REACTION] Снята роль {role.name} с пользователя {member}")
-                except Exception as e:
-                    print(f"[ERROR] Не удалось снять роль: {e}")
-
-# ================= OTHER EVENTS (same as before) =================
-
 @bot.event
 async def on_member_remove(member: disnake.Member):
     guild = member.guild
@@ -235,6 +212,59 @@ async def on_invite_create(invite: disnake.Invite):
 async def on_invite_delete(invite: disnake.Invite):
     cur.execute("DELETE FROM invites_snapshot WHERE invite_code=?", (invite.code,))
     db.commit()
+
+# ================= REACTION ROLE EVENTS =================
+@bot.event
+async def on_raw_reaction_add(payload: disnake.RawReactionActionEvent):
+    if payload.member is None or payload.member.bot:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    row = cur.execute(
+        "SELECT role_id FROM reaction_roles WHERE guild_id=? AND channel_id=? AND message_id=? AND emoji=?",
+        (payload.guild_id, payload.channel_id, payload.message_id, str(payload.emoji))
+    ).fetchone()
+    if row:
+        role = guild.get_role(row["role_id"])
+        if role:
+            try:
+                await payload.member.add_roles(role)
+                await log_to_channel(
+                    title="✅ Выдана реакционная роль",
+                    description=f"Пользователь {payload.member.mention} получил роль {role.mention} за реакцию {payload.emoji}",
+                    color=0x00ff00
+                )
+            except Exception as e:
+                print(f"[ERROR] Не удалось выдать роль: {e}")
+
+@bot.event
+async def on_raw_reaction_remove(payload: disnake.RawReactionActionEvent):
+    if payload.user_id == bot.user.id:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    row = cur.execute(
+        "SELECT role_id FROM reaction_roles WHERE guild_id=? AND channel_id=? AND message_id=? AND emoji=?",
+        (payload.guild_id, payload.channel_id, payload.message_id, str(payload.emoji))
+    ).fetchone()
+    if row:
+        role = guild.get_role(row["role_id"])
+        if role:
+            member = guild.get_member(payload.user_id)
+            if member:
+                try:
+                    await member.remove_roles(role)
+                    await log_to_channel(
+                        title="❌ Снята реакционная роль",
+                        description=f"Пользователь {member.mention} лишился роли {role.mention} (снял реакцию {payload.emoji})",
+                        color=0xff0000
+                    )
+                except Exception as e:
+                    print(f"[ERROR] Не удалось снять роль: {e}")
+
+# ================= STATISTICS FUNCTIONS =================
 
 async def get_invite_stats(guild: disnake.Guild, user: disnake.Member, giveaway_id: int = None):
     if giveaway_id is None:
@@ -321,6 +351,13 @@ class GiveawayModal(ui.Modal):
         asyncio.create_task(schedule_end(gid))
         await inter.edit_original_message(content=f"✅ Розыгрыш создан! ID: `{gid}`")
 
+        # Лог в канал
+        await log_to_channel(
+            title="🎉 Создан розыгрыш",
+            description=f"**ID:** {gid}\n**Приз:** {prize}\n**Канал:** {inter.channel.mention}\n**Создал:** {inter.author.mention}\n**Завершится:** <t:{end_time}:F>",
+            color=0x00ff00
+        )
+
 class GiveawayView(disnake.ui.View):
     def __init__(self, gid: int):
         super().__init__(timeout=None)
@@ -379,6 +416,7 @@ async def finish_giveaway(gid: int):
     if channel is None:
         print(f"[ERROR] Канал {row['channel_id']} не найден")
         return
+
     participants = list_from_str(row["participants"])
     winners_count = row["winners_count"]
     required_invites = row["required_invites"]
@@ -396,13 +434,17 @@ async def finish_giveaway(gid: int):
                 valid_participants.append(uid)
     else:
         valid_participants = participants.copy()
+
     pool = valid_participants.copy()
     random.shuffle(pool)
     winners = pool[:winners_count]
+
     cur.execute("UPDATE giveaways SET winners=?, status='finished' WHERE giveaway_id=?", (str_from_list(winners), gid))
     db.commit()
+
     winners_mentions = "\n".join(f"<@{u}>" for u in winners) if winners else "Нет победителей 😔"
     embed = disnake.Embed(title="🎉 Розыгрыш завершён!", color=0x676767, description=f"**Победители:**\n{winners_mentions}\n\n**Приз:** {row['prize']}\n**Закончено:** <t:{row['end_time']}:F>")
+
     try:
         msg = await channel.fetch_message(row["message_id"])
         end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
@@ -413,6 +455,13 @@ async def finish_giveaway(gid: int):
         await msg.reply(embed=embed, mention_author=False)
     except Exception:
         await channel.send(embed=embed)
+
+    # Лог в канал
+    await log_to_channel(
+        title="🏁 Розыгрыш завершён",
+        description=f"**ID:** {gid}\n**Приз:** {row['prize']}\n**Победители:** {winners_mentions}",
+        color=0xffaa00
+    )
 
 # ================= COMMANDS =================
 
@@ -456,6 +505,11 @@ async def del_invites(inter: disnake.ApplicationCommandInteraction, user: disnak
     db.commit()
     embed = disnake.Embed(title="✅ Статистика сброшена", description=f"Все данные по инвайтам для {user.mention} удалены.", color=0x00ff00)
     await inter.send(embed=embed, ephemeral=True)
+    await log_to_channel(
+        title="🗑️ Сброс инвайтов",
+        description=f"Админ {inter.author.mention} сбросил статистику инвайтов для {user.mention}",
+        color=0xff6600
+    )
 
 @bot.slash_command(
     name="reactionrole",
@@ -463,7 +517,6 @@ async def del_invites(inter: disnake.ApplicationCommandInteraction, user: disnak
     default_member_permissions=disnake.Permissions(administrator=True)
 )
 async def reactionrole(inter: disnake.ApplicationCommandInteraction):
-    # Это группа, чтобы не было пустой команды
     pass
 
 @reactionrole.sub_command(name="add", description="Добавить реакционную роль")
@@ -473,20 +526,17 @@ async def reactionrole_add(
     emoji: str = commands.Param(description="Эмодзи (например, ✅ или <:имя:ID>)"),
     role: disnake.Role = commands.Param(description="Роль, которая будет выдаваться")
 ):
-    # Проверяем, что сообщение существует
     try:
         msg = await inter.channel.fetch_message(int(message_id))
     except Exception:
         return await inter.send("❌ Сообщение не найдено в этом канале.", ephemeral=True)
 
-    # Сохраняем в базу
     cur.execute(
         "INSERT INTO reaction_roles (guild_id, channel_id, message_id, emoji, role_id) VALUES (?, ?, ?, ?, ?)",
         (inter.guild.id, inter.channel.id, int(message_id), emoji, role.id)
     )
     db.commit()
 
-    # Ставим реакцию от бота
     try:
         await msg.add_reaction(parse_emoji(emoji))
     except Exception as e:
@@ -499,6 +549,12 @@ async def reactionrole_add(
         color=0x00ff00
     )
     await inter.send(embed=embed, ephemeral=True)
+
+    await log_to_channel(
+        title="➕ Добавлена реакционная роль",
+        description=f"Админ {inter.author.mention} создал реакцию {emoji} → {role.mention} на [сообщение]({msg.jump_url})",
+        color=0x00aaff
+    )
 
 @bot.slash_command(
     name="reroll",
@@ -530,6 +586,12 @@ async def reroll(inter: disnake.ApplicationCommandInteraction, giveaway_id: int)
         if channel:
             await channel.send(embed=embed)
     await inter.response.send_message("✅ Reroll выполнен.", ephemeral=True)
+
+    await log_to_channel(
+        title="🔄 Reroll выполнен",
+        description=f"Для розыгрыша **#{giveaway_id}** (`{row['prize']}`) выбран новый победитель: <@{new_winner}>",
+        color=0xff9900
+    )
 
 @bot.slash_command(
     name="end_giveaway",
@@ -590,18 +652,27 @@ async def list_giveaways(
 async def on_ready():
     await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Giveaways 🎉"))
 
-    # Проверяем сброс инвайтов
-    reset_done = cur.execute("SELECT value FROM settings WHERE key='invites_reset_done'").fetchone()
-    if not reset_done:
+    # Сброс старых данных (инвайты и розыгрыши) при первом запуске
+    reset_invites = cur.execute("SELECT value FROM settings WHERE key='invites_reset_done'").fetchone()
+    if not reset_invites:
         cur.execute("DELETE FROM invites")
         cur.execute("DELETE FROM invites_snapshot")
         cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('invites_reset_done', '1')")
         db.commit()
-        print("[INFO] Старые данные обнулены. Начинаем учёт с нуля.")
+        await log_to_channel("🔄 Сброс инвайтов", "Старые данные по инвайтам удалены. Начинаем учёт с нуля.", color=0xff6600)
 
+    reset_giveaways = cur.execute("SELECT value FROM settings WHERE key='giveaways_reset_done'").fetchone()
+    if not reset_giveaways:
+        cur.execute("DELETE FROM giveaways")
+        cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('giveaways_reset_done', '1')")
+        db.commit()
+        await log_to_channel("🔄 Сброс розыгрышей", "Все старые розыгрыши удалены.", color=0xff6600)
+
+    # Синхронизация инвайтов
     for guild in bot.guilds:
         await sync_invites(guild)
 
+    # Восстановление активных розыгрышей
     active_rows = cur.execute("SELECT giveaway_id FROM giveaways WHERE status='active'").fetchall()
     for r in active_rows:
         gid = r["giveaway_id"]
@@ -609,6 +680,11 @@ async def on_ready():
         bot.add_view(view)
         asyncio.create_task(schedule_end(gid))
 
+    await log_to_channel(
+        "✅ Бот запущен",
+        f"**{bot.user}** готов к работе.\nАктивных розыгрышей: {len(active_rows)}",
+        color=0x00ff00
+    )
     print(f"✅ Bot ready as {bot.user} | Активных розыгрышей: {len(active_rows)}")
 
 # ================= RUN =================
