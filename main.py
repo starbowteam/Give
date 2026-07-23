@@ -118,41 +118,18 @@ async def sync_invites(guild: disnake.Guild):
         )
     db.commit()
 
-async def sync_all_invites(guild: disnake.Guild):
-    """Полная синхронизация текущих инвайтов для всех пользователей гильдии."""
-    try:
-        invites = await guild.invites()
-    except Exception as e:
-        print(f"[ERROR] sync_all_invites для {guild.id}: {e}")
-        return
-
-    inviter_stats = {}
-    for inv in invites:
-        if inv.inviter:
-            inviter_id = inv.inviter.id
-            inviter_stats[inviter_id] = inviter_stats.get(inviter_id, 0) + inv.uses
-
-    cur.execute("DELETE FROM invites WHERE guild_id=?", (guild.id,))
-    for inviter_id, count in inviter_stats.items():
-        for _ in range(count):
-            cur.execute(
-                "INSERT INTO invites (guild_id, inviter_id, member_id, joined_at, is_bot, is_fake, left_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (guild.id, inviter_id, 0, 0, 0, 0, None)
-            )
-    db.commit()
-    print(f"[INFO] Синхронизированы инвайты для гильдии {guild.name}: {len(inviter_stats)} пользователей")
-
 @bot.event
 async def on_ready():
     await bot.change_presence(
         status=disnake.Status.online,
-        activity=disnake.Game("Розыграши Diamond")
+        activity=disnake.Game("Giveaways 🎉")
     )
 
+    # Синхронизируем снепшоты инвайтов для отслеживания новых
     for guild in bot.guilds:
         await sync_invites(guild)
-        await sync_all_invites(guild)
 
+    # Восстанавливаем активные розыгрыши
     active_rows = cur.execute(
         "SELECT giveaway_id FROM giveaways WHERE status='active'"
     ).fetchall()
@@ -604,7 +581,7 @@ async def invites(inter: disnake.ApplicationCommandInteraction, user: disnake.Me
         footer = f"Период розыгрыша: <t:{g_row['created_at']}:d> – <t:{g_row['end_time']}:d>"
     else:
         title = f"📨 Инвайты — {user.display_name}"
-        footer = "За всё время"
+        footer = "Статистика с 23.07.2026"  # Новая дата начала отсчёта
 
     embed = disnake.Embed(
         title=title,
@@ -628,7 +605,6 @@ async def invites(inter: disnake.ApplicationCommandInteraction, user: disnake.Me
 )
 async def del_invites(inter: disnake.ApplicationCommandInteraction, user: disnake.Member):
     """Сбрасывает всю статистику инвайтов для указанного пользователя."""
-    # Удаляем все записи инвайтов для этого пользователя
     cur.execute(
         "DELETE FROM invites WHERE guild_id=? AND inviter_id=?",
         (inter.guild.id, user.id)
