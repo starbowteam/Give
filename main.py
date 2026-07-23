@@ -33,8 +33,6 @@ db.execute("PRAGMA journal_mode=WAL")
 db.execute("PRAGMA synchronous=NORMAL")
 
 cur = db.cursor()
-
-# Создаём таблицы с правильной схемой (добавлена колонка created_at)
 cur.executescript("""
 CREATE TABLE IF NOT EXISTS giveaways (
     giveaway_id   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,12 +85,11 @@ CREATE TABLE IF NOT EXISTS reaction_roles (
 """)
 db.commit()
 
-# Проверяем, существует ли колонка created_at, если нет – добавляем
 try:
     cur.execute("ALTER TABLE giveaways ADD COLUMN created_at INTEGER")
     db.commit()
 except sqlite3.OperationalError:
-    pass  # колонка уже существует
+    pass
 
 # ================= LOGGING =================
 async def log_to_channel(title: str, description: str, color: int = 0x00ff00, fields: list = None):
@@ -306,6 +303,31 @@ def build_giveaway_embeds(prize, description, winners_count, participants_count,
     embed_main.set_image(url="https://cdn.discordapp.com/attachments/1223595469746475049/1459289685405728951/image_2026-01-10_00-22-10.png")
     return [embed_banner, embed_main]
 
+# ================= НОВАЯ ФУНКЦИЯ ДЛЯ ФИНАЛЬНОГО ЭМБЕДА =================
+def build_finished_giveaway_embed(prize, description, participants_count, winners_mentions, end_dt):
+    end_ts = int(end_dt.timestamp())
+    embed_banner = disnake.Embed(color=6776679)
+    embed_banner.set_image(
+        url="https://cdn.discordapp.com/attachments/1527006158282555412/1529712107824611369/image.png?ex=6a62eeeb&is=6a619d6b&hm=56fadbbd813b5be5ff9fdf40b0f834dde9b3f90d6ff74054f224f8d23640a530&"
+    )
+
+    desc_text = (
+        f"{description}\n\n"
+        f"**Приз:** {prize}\n"
+        f"**Участвовали:** {participants_count}\n"
+        f"**Победитель:** {winners_mentions}\n"
+        f"**Закончено:** <t:{end_ts}:F>"
+    )
+    embed_main = disnake.Embed(
+        title="🎉 Розыгрыш завершен!",
+        description=desc_text,
+        color=6776679
+    )
+    embed_main.set_image(
+        url="https://cdn.discordapp.com/attachments/1223595469746475049/1459289685405728951/image_2026-01-10_00-22-10.png"
+    )
+    return [embed_banner, embed_main]
+
 # ================= GIVEAWAY MODAL AND VIEWS =================
 
 class GiveawayModal(ui.Modal):
@@ -358,7 +380,6 @@ class GiveawayModal(ui.Modal):
         asyncio.create_task(schedule_end(gid))
         await inter.edit_original_message(content=f"✅ Розыгрыш создан! **ID: `{gid}`**")
 
-        # Лог с ID
         await log_to_channel(
             title="🎉 Создан розыгрыш",
             description=f"**ID:** `{gid}`\n**Приз:** {prize}\n**Канал:** {inter.channel.mention}\n**Создал:** {inter.author.mention}\n**Завершится:** <t:{end_time}:F>",
@@ -411,14 +432,17 @@ async def schedule_end(gid: int):
         await asyncio.sleep(delay)
     await finish_giveaway(gid)
 
+# ================= ИЗМЕНЁННАЯ ФУНКЦИЯ FINISH_GIVEAWAY =================
 async def finish_giveaway(gid: int):
     row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=?", (gid,)).fetchone()
     if not row or row["status"] != "active":
         return
+
     guild = bot.get_guild(row["guild_id"])
     if guild is None:
         print(f"[ERROR] Guild {row['guild_id']} не найден")
         return
+
     channel = guild.get_channel(row["channel_id"]) or bot.get_channel(row["channel_id"])
     if channel is None:
         print(f"[ERROR] Канал {row['channel_id']} не найден")
@@ -427,6 +451,7 @@ async def finish_giveaway(gid: int):
     participants = list_from_str(row["participants"])
     winners_count = row["winners_count"]
     required_invites = row["required_invites"]
+
     valid_participants = []
     if required_invites > 0:
         for uid in participants:
@@ -449,19 +474,34 @@ async def finish_giveaway(gid: int):
     cur.execute("UPDATE giveaways SET winners=?, status='finished' WHERE giveaway_id=?", (str_from_list(winners), gid))
     db.commit()
 
-    winners_mentions = "\n".join(f"<@{u}>" for u in winners) if winners else "Нет победителей 😔"
-    embed = disnake.Embed(title="🎉 Розыгрыш завершён!", color=0x676767, description=f"**Победители:**\n{winners_mentions}\n\n**Приз:** {row['prize']}\n**Закончено:** <t:{row['end_time']}:F>")
+    winners_mentions = " ".join(f"<@{u}>" for u in winners) if winners else "Нет победителей 😔"
 
+    # Удаляем оригинальное сообщение розыгрыша
     try:
         msg = await channel.fetch_message(row["message_id"])
-        end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
-        finished_embeds = build_giveaway_embeds(row["prize"], row["description"], row["winners_count"], len(participants), end_dt, row["required_invites"])
-        finished_embeds[-1].title = "🎉 Розыгрыш завершён"
-        finished_embeds[-1].color = 0x676767
-        await msg.edit(embeds=finished_embeds, view=None)
-        await msg.reply(embed=embed, mention_author=False)
+        await msg.delete()
     except Exception:
-        await channel.send(embed=embed)
+        pass
+
+    # Отправляем текстовое сообщение с пингом
+    if winners:
+        await channel.send(f"{winners_mentions} — выйграл! Напишите в течение 24 часов. После приз будет разыгран другому человеку.")
+    else:
+        await channel.send("😔 Победителей нет. Приз остаётся неразыгранным.")
+
+    # Отправляем финальный embed
+    end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
+    finished_embeds = build_finished_giveaway_embed(
+        row["prize"],
+        row["description"],
+        len(participants),
+        winners_mentions,
+        end_dt
+    )
+    try:
+        await channel.send(embeds=finished_embeds)
+    except Exception:
+        await channel.send(embed=finished_embeds[1])
 
     await log_to_channel(
         title="🏁 Розыгрыш завершён",
@@ -656,13 +696,11 @@ async def list_giveaways(
 
 @bot.event
 async def on_ready():
-    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Для розыгрышей"))
+    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Призы и инвайты"))
 
-    # Синхронизация инвайтов (снепшоты)
     for guild in bot.guilds:
         await sync_invites(guild)
 
-    # Восстанавливаем активные розыгрыши
     active_rows = cur.execute("SELECT giveaway_id FROM giveaways WHERE status='active'").fetchall()
     for r in active_rows:
         gid = r["giveaway_id"]
