@@ -395,16 +395,17 @@ class JoinButton(disnake.ui.Button):
         self.gid = gid
 
     async def callback(self, inter: disnake.MessageInteraction):
-        # Мгновенно подтверждаем, чтобы избежать таймаута
         await inter.response.defer(ephemeral=True)
 
         try:
             row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=?", (self.gid,)).fetchone()
             if not row or row["status"] != "active":
-                return await inter.edit_original_message(content="❌ Розыгрыш не найден или уже завершён.")
+                await inter.edit_original_message(content=None)
+                return
 
             participants = list_from_str(row["participants"])
             user_id = inter.user.id
+            prize = row["prize"]
 
             if user_id in participants:
                 participants.remove(user_id)
@@ -416,7 +417,13 @@ class JoinButton(disnake.ui.Button):
                     await inter.message.edit(embeds=embeds)
                 except Exception:
                     pass
-                return await inter.edit_original_message(content="❎ Ты вышел из розыгрыша.")
+                # Отправляем в ЛС
+                try:
+                    await inter.user.send(f"❎ Ты вышел из розыгрыша на приз: {prize} 🎉")
+                except:
+                    pass
+                await inter.edit_original_message(content=None)
+                return
 
             participants.append(user_id)
             cur.execute("UPDATE giveaways SET participants=? WHERE giveaway_id=?", (str_from_list(participants), self.gid))
@@ -427,7 +434,12 @@ class JoinButton(disnake.ui.Button):
                 await inter.message.edit(embeds=embeds)
             except Exception:
                 pass
-            await inter.edit_original_message(content="✅ Ты участвуешь!")
+            # Отправляем в ЛС
+            try:
+                await inter.user.send(f"✅ Ты участвуешь в розыгрыше на приз: {prize} 🎉")
+            except:
+                pass
+            await inter.edit_original_message(content=None)
         except Exception as e:
             print(f"[ERROR] Ошибка в кнопке: {e}")
             await inter.edit_original_message(content="❌ Произошла ошибка. Попробуйте позже.")
@@ -711,7 +723,7 @@ async def list_giveaways(
 
 @bot.event
 async def on_ready():
-    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Приглашения и призы"))
+    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Мероприятия"))
 
     for guild in bot.guilds:
         await sync_invites(guild)
