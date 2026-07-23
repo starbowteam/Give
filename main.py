@@ -9,6 +9,7 @@ from datetime import datetime, timezone, timedelta
 import re
 import ast
 
+# ================= TOKEN from ENV =================
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     print("❌ Ошибка: переменная окружения BOT_TOKEN не установлена.")
@@ -18,6 +19,7 @@ intents = disnake.Intents.default()
 intents.members = True
 intents.guilds = True
 intents.invites = True
+intents.message_content = True  # для чтения содержимого сообщений (если нужно)
 
 bot = commands.InteractionBot(intents=intents)
 
@@ -69,6 +71,15 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS reaction_roles (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id    INTEGER,
+    channel_id  INTEGER,
+    message_id  INTEGER,
+    emoji       TEXT,
+    role_id     INTEGER
+);
 """)
 db.commit()
 
@@ -98,6 +109,15 @@ def parse_duration(duration_str: str):
     if unit == 'd':
         return timedelta(days=value)
 
+def parse_emoji(emoji_str: str):
+    """Парсит строку эмодзи в объект PartialEmoji или str."""
+    try:
+        return disnake.PartialEmoji.from_str(emoji_str)
+    except Exception:
+        return emoji_str  # если не кастомный, просто вернуть строку
+
+# ================= INVITE TRACKING =================
+
 async def sync_invites(guild: disnake.Guild):
     try:
         invites = await guild.invites()
@@ -110,38 +130,18 @@ async def sync_invites(guild: disnake.Guild):
         )
     db.commit()
 
-@bot.event
-async def on_ready():
-    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Для розыгрышей"))
-
-    # Проверяем, был ли уже выполнен сброс
-    reset_done = cur.execute("SELECT value FROM settings WHERE key='invites_reset_done'").fetchone()
-    if not reset_done:
-        # Первый запуск — удаляем все старые данные
-        cur.execute("DELETE FROM invites")
-        cur.execute("DELETE FROM invites_snapshot")
-        cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('invites_reset_done', '1')")
-        db.commit()
-        print("[INFO] Старые данные обнулены. Начинаем учёт с нуля.")
-    else:
-        print("[INFO] Сброс уже был выполнен. Продолжаем учёт.")
-
-    # Синхронизируем снепшоты для всех гильдий
-    for guild in bot.guilds:
-        await sync_invites(guild)
-
-    # Восстанавливаем активные розыгрыши
-    active_rows = cur.execute("SELECT giveaway_id FROM giveaways WHERE status='active'").fetchall()
-    for r in active_rows:
-        gid = r["giveaway_id"]
-        view = GiveawayView(gid)
-        bot.add_view(view)
-        asyncio.create_task(schedule_end(gid))
-
-    print(f"✅ Bot ready as {bot.user} | Активных розыгрышей: {len(active_rows)}")
-
+# ================= AUTO-ROLE ON JOIN =================
 @bot.event
 async def on_member_join(member: disnake.Member):
+    # Выдаём основную роль
+    role = member.guild.get_role(1127428607606796290)
+    if role:
+        try:
+            await member.add_roles(role)
+            print(f"[INFO] Выдана роль {role.name} пользователю {member}")
+        except Exception as e:
+            print(f"[ERROR] Не удалось выдать роль: {e}")
+    # Отслеживаем инвайты (старая логика)
     guild = member.guild
     snapshot_before = {row["invite_code"]: row for row in cur.execute("SELECT * FROM invites_snapshot WHERE guild_id=?", (guild.id,)).fetchall()}
     try:
@@ -166,6 +166,52 @@ async def on_member_join(member: disnake.Member):
     cur.execute("INSERT INTO invites (guild_id, inviter_id, member_id, joined_at, is_bot) VALUES (?, ?, ?, ?, ?)",
                 (guild.id, inviter_id, member.id, joined_at, is_bot))
     db.commit()
+
+# ================= REACTION ROLE EVENTS =================
+@bot.event
+async def on_raw_reaction_add(payload: disnake.RawReactionActionEvent):
+    if payload.member is None or payload.member.bot:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    # Проверяем, есть ли такая реакция в таблице
+    row = cur.execute(
+        "SELECT role_id FROM reaction_roles WHERE guild_id=? AND channel_id=? AND message_id=? AND emoji=?",
+        (payload.guild_id, payload.channel_id, payload.message_id, str(payload.emoji))
+    ).fetchone()
+    if row:
+        role = guild.get_role(row["role_id"])
+        if role:
+            try:
+                await payload.member.add_roles(role)
+                print(f"[REACTION] Выдана роль {role.name} пользователю {payload.member}")
+            except Exception as e:
+                print(f"[ERROR] Не удалось выдать роль: {e}")
+
+@bot.event
+async def on_raw_reaction_remove(payload: disnake.RawReactionActionEvent):
+    if payload.user_id == bot.user.id:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    row = cur.execute(
+        "SELECT role_id FROM reaction_roles WHERE guild_id=? AND channel_id=? AND message_id=? AND emoji=?",
+        (payload.guild_id, payload.channel_id, payload.message_id, str(payload.emoji))
+    ).fetchone()
+    if row:
+        role = guild.get_role(row["role_id"])
+        if role:
+            member = guild.get_member(payload.user_id)
+            if member:
+                try:
+                    await member.remove_roles(role)
+                    print(f"[REACTION] Снята роль {role.name} с пользователя {member}")
+                except Exception as e:
+                    print(f"[ERROR] Не удалось снять роль: {e}")
+
+# ================= OTHER EVENTS (same as before) =================
 
 @bot.event
 async def on_member_remove(member: disnake.Member):
@@ -222,6 +268,8 @@ def build_giveaway_embeds(prize, description, winners_count, participants_count,
     embed_main = disnake.Embed(title="🎉 Розыгрыш", description=desc_text, color=6776679)
     embed_main.set_image(url="https://cdn.discordapp.com/attachments/1223595469746475049/1459289685405728951/image_2026-01-10_00-22-10.png")
     return [embed_banner, embed_main]
+
+# ================= GIVEAWAY MODAL AND VIEWS =================
 
 class GiveawayModal(ui.Modal):
     def __init__(self):
@@ -366,6 +414,8 @@ async def finish_giveaway(gid: int):
     except Exception:
         await channel.send(embed=embed)
 
+# ================= COMMANDS =================
+
 @bot.slash_command(name="giveaway", description="Создать розыгрыш", default_member_permissions=disnake.Permissions(administrator=True))
 async def giveaway(inter: disnake.ApplicationCommandInteraction):
     await inter.response.send_modal(GiveawayModal())
@@ -407,7 +457,54 @@ async def del_invites(inter: disnake.ApplicationCommandInteraction, user: disnak
     embed = disnake.Embed(title="✅ Статистика сброшена", description=f"Все данные по инвайтам для {user.mention} удалены.", color=0x00ff00)
     await inter.send(embed=embed, ephemeral=True)
 
-@bot.slash_command(name="reroll", description="Выбрать нового победителя", default_member_permissions=disnake.Permissions(administrator=True))
+@bot.slash_command(
+    name="reactionrole",
+    description="Управление реакционными ролями",
+    default_member_permissions=disnake.Permissions(administrator=True)
+)
+async def reactionrole(inter: disnake.ApplicationCommandInteraction):
+    # Это группа, чтобы не было пустой команды
+    pass
+
+@reactionrole.sub_command(name="add", description="Добавить реакционную роль")
+async def reactionrole_add(
+    inter: disnake.ApplicationCommandInteraction,
+    message_id: str = commands.Param(description="ID сообщения (можно скопировать в Discord)"),
+    emoji: str = commands.Param(description="Эмодзи (например, ✅ или <:имя:ID>)"),
+    role: disnake.Role = commands.Param(description="Роль, которая будет выдаваться")
+):
+    # Проверяем, что сообщение существует
+    try:
+        msg = await inter.channel.fetch_message(int(message_id))
+    except Exception:
+        return await inter.send("❌ Сообщение не найдено в этом канале.", ephemeral=True)
+
+    # Сохраняем в базу
+    cur.execute(
+        "INSERT INTO reaction_roles (guild_id, channel_id, message_id, emoji, role_id) VALUES (?, ?, ?, ?, ?)",
+        (inter.guild.id, inter.channel.id, int(message_id), emoji, role.id)
+    )
+    db.commit()
+
+    # Ставим реакцию от бота
+    try:
+        await msg.add_reaction(parse_emoji(emoji))
+    except Exception as e:
+        await inter.send(f"⚠️ Не удалось поставить реакцию: {e}", ephemeral=True)
+        return
+
+    embed = disnake.Embed(
+        title="✅ Реакционная роль добавлена",
+        description=f"На сообщение {msg.jump_url} добавлена реакция {emoji}, выдающая роль {role.mention}.",
+        color=0x00ff00
+    )
+    await inter.send(embed=embed, ephemeral=True)
+
+@bot.slash_command(
+    name="reroll",
+    description="Выбрать нового победителя",
+    default_member_permissions=disnake.Permissions(administrator=True)
+)
 async def reroll(inter: disnake.ApplicationCommandInteraction, giveaway_id: int):
     row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=?", (giveaway_id,)).fetchone()
     if not row:
@@ -434,7 +531,11 @@ async def reroll(inter: disnake.ApplicationCommandInteraction, giveaway_id: int)
             await channel.send(embed=embed)
     await inter.response.send_message("✅ Reroll выполнен.", ephemeral=True)
 
-@bot.slash_command(name="end_giveaway", description="Принудительно завершить розыгрыш", default_member_permissions=disnake.Permissions(administrator=True))
+@bot.slash_command(
+    name="end_giveaway",
+    description="Принудительно завершить розыгрыш",
+    default_member_permissions=disnake.Permissions(administrator=True)
+)
 async def end_giveaway(inter: disnake.ApplicationCommandInteraction, giveaway_id: int):
     row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=? AND status='active'", (giveaway_id,)).fetchone()
     if not row:
@@ -443,8 +544,15 @@ async def end_giveaway(inter: disnake.ApplicationCommandInteraction, giveaway_id
     await finish_giveaway(giveaway_id)
     await inter.edit_original_message(content="✅ Розыгрыш завершён.")
 
-@bot.slash_command(name="list_giveaways", description="Список розыгрышей", default_member_permissions=disnake.Permissions(administrator=True))
-async def list_giveaways(inter: disnake.ApplicationCommandInteraction, статус: str = commands.Param(default="все", choices=["все", "активные", "завершённые"])):
+@bot.slash_command(
+    name="list_giveaways",
+    description="Список розыгрышей",
+    default_member_permissions=disnake.Permissions(administrator=True)
+)
+async def list_giveaways(
+    inter: disnake.ApplicationCommandInteraction,
+    статус: str = commands.Param(default="все", choices=["все", "активные", "завершённые"])
+):
     if статус == "активные":
         rows = cur.execute("SELECT * FROM giveaways WHERE guild_id=? AND status='active' ORDER BY giveaway_id DESC", (inter.guild.id,)).fetchall()
         title = "🟢 Активные розыгрыши"
@@ -475,5 +583,34 @@ async def list_giveaways(inter: disnake.ApplicationCommandInteraction, стат�
     embed = disnake.Embed(title=title, description="\n\n".join(lines), color=6776679)
     embed.set_footer(text=f"Всего: {len(rows)}")
     await inter.send(embed=embed, ephemeral=True)
+
+# ================= ON_READY =================
+
+@bot.event
+async def on_ready():
+    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Giveaways 🎉"))
+
+    # Проверяем сброс инвайтов
+    reset_done = cur.execute("SELECT value FROM settings WHERE key='invites_reset_done'").fetchone()
+    if not reset_done:
+        cur.execute("DELETE FROM invites")
+        cur.execute("DELETE FROM invites_snapshot")
+        cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('invites_reset_done', '1')")
+        db.commit()
+        print("[INFO] Старые данные обнулены. Начинаем учёт с нуля.")
+
+    for guild in bot.guilds:
+        await sync_invites(guild)
+
+    active_rows = cur.execute("SELECT giveaway_id FROM giveaways WHERE status='active'").fetchall()
+    for r in active_rows:
+        gid = r["giveaway_id"]
+        view = GiveawayView(gid)
+        bot.add_view(view)
+        asyncio.create_task(schedule_end(gid))
+
+    print(f"✅ Bot ready as {bot.user} | Активных розыгрышей: {len(active_rows)}")
+
+# ================= RUN =================
 
 bot.run(TOKEN)
