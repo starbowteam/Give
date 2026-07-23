@@ -303,7 +303,6 @@ def build_giveaway_embeds(prize, description, winners_count, participants_count,
     embed_main.set_image(url="https://cdn.discordapp.com/attachments/1223595469746475049/1459289685405728951/image_2026-01-10_00-22-10.png")
     return [embed_banner, embed_main]
 
-# ================= НОВАЯ ФУНКЦИЯ ДЛЯ ФИНАЛЬНОГО ЭМБЕДА =================
 def build_finished_giveaway_embed(prize, description, participants_count, winners_mentions, end_dt):
     end_ts = int(end_dt.timestamp())
     embed_banner = disnake.Embed(color=6776679)
@@ -432,7 +431,6 @@ async def schedule_end(gid: int):
         await asyncio.sleep(delay)
     await finish_giveaway(gid)
 
-# ================= ИЗМЕНЁННАЯ ФУНКЦИЯ FINISH_GIVEAWAY =================
 async def finish_giveaway(gid: int):
     row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=?", (gid,)).fetchone()
     if not row or row["status"] != "active":
@@ -476,20 +474,20 @@ async def finish_giveaway(gid: int):
 
     winners_mentions = " ".join(f"<@{u}>" for u in winners) if winners else "Нет победителей 😔"
 
-    # Удаляем оригинальное сообщение розыгрыша
+    # --- Удаляем оригинальное сообщение ---
     try:
         msg = await channel.fetch_message(row["message_id"])
         await msg.delete()
     except Exception:
-        pass
+        pass  # если не удалось – игнорируем
 
-    # Отправляем текстовое сообщение с пингом
+    # --- Текстовое сообщение с пингом победителя ---
     if winners:
         await channel.send(f"{winners_mentions} — выйграл! Напишите в течение 24 часов. После приз будет разыгран другому человеку.")
     else:
         await channel.send("😔 Победителей нет. Приз остаётся неразыгранным.")
 
-    # Отправляем финальный embed
+    # --- Финальный embed с новой картинкой ---
     end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
     finished_embeds = build_finished_giveaway_embed(
         row["prize"],
@@ -501,7 +499,7 @@ async def finish_giveaway(gid: int):
     try:
         await channel.send(embeds=finished_embeds)
     except Exception:
-        await channel.send(embed=finished_embeds[1])
+        await channel.send(embed=finished_embeds[1])  # fallback
 
     await log_to_channel(
         title="🏁 Розыгрыш завершён",
@@ -696,7 +694,7 @@ async def list_giveaways(
 
 @bot.event
 async def on_ready():
-    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Призы и инвайты"))
+    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Giveaways 🎉"))
 
     for guild in bot.guilds:
         await sync_invites(guild)
