@@ -395,16 +395,30 @@ class JoinButton(disnake.ui.Button):
         self.gid = gid
 
     async def callback(self, inter: disnake.MessageInteraction):
-        # Сначала отвечаем, чтобы не было таймаута
+        # Мгновенно подтверждаем, чтобы избежать таймаута
         await inter.response.defer(ephemeral=True)
 
-        row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=?", (self.gid,)).fetchone()
-        if not row or row["status"] != "active":
-            return await inter.edit_original_message(content="❌ Розыгрыш не найден или уже завершён.")
+        try:
+            row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=?", (self.gid,)).fetchone()
+            if not row or row["status"] != "active":
+                return await inter.edit_original_message(content="❌ Розыгрыш не найден или уже завершён.")
 
-        participants = list_from_str(row["participants"])
-        if inter.user.id in participants:
-            participants.remove(inter.user.id)
+            participants = list_from_str(row["participants"])
+            user_id = inter.user.id
+
+            if user_id in participants:
+                participants.remove(user_id)
+                cur.execute("UPDATE giveaways SET participants=? WHERE giveaway_id=?", (str_from_list(participants), self.gid))
+                db.commit()
+                end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
+                embeds = build_giveaway_embeds(row["prize"], row["description"], row["winners_count"], len(participants), end_dt, row["required_invites"])
+                try:
+                    await inter.message.edit(embeds=embeds)
+                except Exception:
+                    pass
+                return await inter.edit_original_message(content="❎ Ты вышел из розыгрыша.")
+
+            participants.append(user_id)
             cur.execute("UPDATE giveaways SET participants=? WHERE giveaway_id=?", (str_from_list(participants), self.gid))
             db.commit()
             end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
@@ -413,19 +427,10 @@ class JoinButton(disnake.ui.Button):
                 await inter.message.edit(embeds=embeds)
             except Exception:
                 pass
-            return await inter.edit_original_message(content="❎ Ты вышел из розыгрыша.")
-
-        participants.append(inter.user.id)
-        cur.execute("UPDATE giveaways SET participants=? WHERE giveaway_id=?", (str_from_list(participants), self.gid))
-        db.commit()
-        end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
-        embeds = build_giveaway_embeds(row["prize"], row["description"], row["winners_count"], len(participants), end_dt, row["required_invites"])
-        try:
-            await inter.message.edit(embeds=embeds)
-        except Exception:
-            pass
-
-        await inter.edit_original_message(content="✅ Ты участвуешь!")
+            await inter.edit_original_message(content="✅ Ты участвуешь!")
+        except Exception as e:
+            print(f"[ERROR] Ошибка в кнопке: {e}")
+            await inter.edit_original_message(content="❌ Произошла ошибка. Попробуйте позже.")
 
 async def schedule_end(gid: int):
     row = cur.execute("SELECT end_time FROM giveaways WHERE giveaway_id=?", (gid,)).fetchone()
@@ -706,7 +711,7 @@ async def list_giveaways(
 
 @bot.event
 async def on_ready():
-    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Инвайты и призы"))
+    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Призы и инвайты"))
 
     for guild in bot.guilds:
         await sync_invites(guild)
