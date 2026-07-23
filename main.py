@@ -690,7 +690,7 @@ async def list_giveaways(
 
 @bot.event
 async def on_ready():
-    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Giveaways 🎉"))
+    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Призы и инвайты"))
 
     for guild in bot.guilds:
         await sync_invites(guild)
