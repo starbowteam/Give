@@ -64,6 +64,11 @@ CREATE TABLE IF NOT EXISTS invites_snapshot (
     uses        INTEGER,
     inviter_id  INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """)
 db.commit()
 
@@ -108,9 +113,24 @@ async def sync_invites(guild: disnake.Guild):
 @bot.event
 async def on_ready():
     await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Giveaways 🎉"))
+
+    # Проверяем, был ли уже выполнен сброс
+    reset_done = cur.execute("SELECT value FROM settings WHERE key='invites_reset_done'").fetchone()
+    if not reset_done:
+        # Первый запуск — удаляем все старые данные
+        cur.execute("DELETE FROM invites")
+        cur.execute("DELETE FROM invites_snapshot")
+        cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('invites_reset_done', '1')")
+        db.commit()
+        print("[INFO] Старые данные обнулены. Начинаем учёт с нуля.")
+    else:
+        print("[INFO] Сброс уже был выполнен. Продолжаем учёт.")
+
+    # Синхронизируем снепшоты для всех гильдий
     for guild in bot.guilds:
         await sync_invites(guild)
 
+    # Восстанавливаем активные розыгрыши
     active_rows = cur.execute("SELECT giveaway_id FROM giveaways WHERE status='active'").fetchall()
     for r in active_rows:
         gid = r["giveaway_id"]
@@ -185,17 +205,11 @@ async def get_invite_stats(guild: disnake.Guild, user: disnake.Member, giveaway_
     remaining = sum(1 for r in rows if r["left_at"] is None and r["member_id"] != 0)
     left = sum(1 for r in rows if r["left_at"] is not None)
     bots = sum(1 for r in rows if r["is_bot"] == 1)
-    bots_remaining = sum(1 for r in rows if r["is_bot"] == 1 and r["left_at"] is None and r["member_id"] != 0)
-    bots_left = sum(1 for r in rows if r["is_bot"] == 1 and r["left_at"] is not None)
-    fake = sum(1 for r in rows if r["is_fake"] == 1)
     return {
         "total": total,
         "remaining": remaining,
         "left": left,
         "bots": bots,
-        "bots_remaining": bots_remaining,
-        "bots_left": bots_left,
-        "fake": fake
     }
 
 def build_giveaway_embeds(prize, description, winners_count, participants_count, end_dt, required_invites=0):
@@ -329,7 +343,7 @@ async def finish_giveaway(gid: int):
             stats = await get_invite_stats(guild, member, giveaway_id=gid)
             if stats is None:
                 continue
-            real_invites = stats["remaining"] - stats["bots_remaining"]
+            real_invites = stats["remaining"] - stats["bots"]
             if real_invites >= required_invites:
                 valid_participants.append(uid)
     else:
@@ -371,7 +385,7 @@ async def invites(inter: disnake.ApplicationCommandInteraction, user: disnake.Me
         footer = f"Период розыгрыша: <t:{g_row['created_at']}:d> – <t:{g_row['end_time']}:d>"
     else:
         title = f"📨 Инвайты — {user.display_name}"
-        footer = "Статистика с 23.07.2026"
+        footer = "Статистика с текущего запуска"
     embed = disnake.Embed(
         title=title,
         color=6776679,
