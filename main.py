@@ -373,7 +373,7 @@ class GiveawayModal(ui.Modal):
         db.commit()
         gid = cur.lastrowid
         view = GiveawayView(gid)
-        bot.add_view(view, message_id=msg.id)  # <--- ПРИВЯЗЫВАЕМ К СООБЩЕНИЮ
+        bot.add_view(view, message_id=msg.id)
         await msg.edit(view=view)
         asyncio.create_task(schedule_end(gid))
         await inter.edit_original_message(content=f"✅ Розыгрыш создан! **ID: `{gid}`**")
@@ -395,9 +395,13 @@ class JoinButton(disnake.ui.Button):
         self.gid = gid
 
     async def callback(self, inter: disnake.MessageInteraction):
+        # Сначала отвечаем, чтобы не было таймаута
+        await inter.response.defer(ephemeral=True)
+
         row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=?", (self.gid,)).fetchone()
         if not row or row["status"] != "active":
-            return await inter.response.send_message("❌ Розыгрыш не найден или уже завершён.", ephemeral=True)
+            return await inter.edit_original_message(content="❌ Розыгрыш не найден или уже завершён.")
+
         participants = list_from_str(row["participants"])
         if inter.user.id in participants:
             participants.remove(inter.user.id)
@@ -409,7 +413,8 @@ class JoinButton(disnake.ui.Button):
                 await inter.message.edit(embeds=embeds)
             except Exception:
                 pass
-            return await inter.response.send_message("❎ Ты вышел из розыгрыша.", ephemeral=True)
+            return await inter.edit_original_message(content="❎ Ты вышел из розыгрыша.")
+
         participants.append(inter.user.id)
         cur.execute("UPDATE giveaways SET participants=? WHERE giveaway_id=?", (str_from_list(participants), self.gid))
         db.commit()
@@ -419,7 +424,8 @@ class JoinButton(disnake.ui.Button):
             await inter.message.edit(embeds=embeds)
         except Exception:
             pass
-        await inter.response.send_message("✅ Ты участвуешь!", ephemeral=True)
+
+        await inter.edit_original_message(content="✅ Ты участвуешь!")
 
 async def schedule_end(gid: int):
     row = cur.execute("SELECT end_time FROM giveaways WHERE giveaway_id=?", (gid,)).fetchone()
@@ -431,77 +437,87 @@ async def schedule_end(gid: int):
     await finish_giveaway(gid)
 
 async def finish_giveaway(gid: int):
-    row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=?", (gid,)).fetchone()
-    if not row or row["status"] != "active":
-        return
-
-    guild = bot.get_guild(row["guild_id"])
-    if guild is None:
-        print(f"[ERROR] Guild {row['guild_id']} не найден")
-        return
-
-    channel = guild.get_channel(row["channel_id"]) or bot.get_channel(row["channel_id"])
-    if channel is None:
-        print(f"[ERROR] Канал {row['channel_id']} не найден")
-        return
-
-    participants = list_from_str(row["participants"])
-    winners_count = row["winners_count"]
-    required_invites = row["required_invites"]
-
-    valid_participants = []
-    if required_invites > 0:
-        for uid in participants:
-            member = guild.get_member(uid)
-            if not member:
-                continue
-            stats = await get_invite_stats(guild, member, giveaway_id=gid)
-            if stats is None:
-                continue
-            real_invites = stats["remaining"] - stats["bots"]
-            if real_invites >= required_invites:
-                valid_participants.append(uid)
-    else:
-        valid_participants = participants.copy()
-
-    pool = valid_participants.copy()
-    random.shuffle(pool)
-    winners = pool[:winners_count]
-
-    cur.execute("UPDATE giveaways SET winners=?, status='finished' WHERE giveaway_id=?", (str_from_list(winners), gid))
-    db.commit()
-
-    winners_mentions = " ".join(f"<@{u}>" for u in winners) if winners else "Нет победителей 😔"
-
     try:
-        msg = await channel.fetch_message(row["message_id"])
-        await msg.delete()
-    except Exception:
-        pass
+        row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=?", (gid,)).fetchone()
+        if not row or row["status"] != "active":
+            return
 
-    if winners:
-        await channel.send(f"{winners_mentions} — выйграл! Напишите в течение 24 часов. После приз будет разыгран другому человеку.")
-    else:
-        await channel.send("😔 Победителей нет. Приз остаётся неразыгранным.")
+        guild = bot.get_guild(row["guild_id"])
+        if guild is None:
+            print(f"[ERROR] Guild {row['guild_id']} не найден")
+            await log_to_channel("❌ Ошибка завершения", f"Гильдия {row['guild_id']} не найдена", color=0xff0000)
+            return
 
-    end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
-    finished_embeds = build_finished_giveaway_embed(
-        row["prize"],
-        row["description"],
-        len(participants),
-        winners_mentions,
-        end_dt
-    )
-    try:
-        await channel.send(embeds=finished_embeds)
-    except Exception:
-        await channel.send(embed=finished_embeds[1])
+        channel = guild.get_channel(row["channel_id"]) or bot.get_channel(row["channel_id"])
+        if channel is None:
+            print(f"[ERROR] Канал {row['channel_id']} не найден")
+            await log_to_channel("❌ Ошибка завершения", f"Канал {row['channel_id']} не найден", color=0xff0000)
+            return
 
-    await log_to_channel(
-        title="🏁 Розыгрыш завершён",
-        description=f"**ID:** `{gid}`\n**Приз:** {row['prize']}\n**Победители:** {winners_mentions}",
-        color=0xffaa00
-    )
+        participants = list_from_str(row["participants"])
+        winners_count = row["winners_count"]
+        required_invites = row["required_invites"]
+
+        valid_participants = []
+        if required_invites > 0:
+            for uid in participants:
+                member = guild.get_member(uid)
+                if not member:
+                    continue
+                stats = await get_invite_stats(guild, member, giveaway_id=gid)
+                if stats is None:
+                    continue
+                real_invites = stats["remaining"] - stats["bots"]
+                if real_invites >= required_invites:
+                    valid_participants.append(uid)
+        else:
+            valid_participants = participants.copy()
+
+        pool = valid_participants.copy()
+        random.shuffle(pool)
+        winners = pool[:winners_count]
+
+        cur.execute("UPDATE giveaways SET winners=?, status='finished' WHERE giveaway_id=?", (str_from_list(winners), gid))
+        db.commit()
+
+        winners_mentions = " ".join(f"<@{u}>" for u in winners) if winners else "Нет победителей 😔"
+
+        # Удаляем оригинальное сообщение
+        try:
+            msg = await channel.fetch_message(row["message_id"])
+            await msg.delete()
+        except Exception as e:
+            print(f"[WARN] Не удалось удалить сообщение: {e}")
+
+        # Текстовое сообщение с пингом
+        if winners:
+            await channel.send(f"{winners_mentions} — выйграл! Напишите в течение 24 часов. После приз будет разыгран другому человеку.")
+        else:
+            await channel.send("😔 Победителей нет. Приз остаётся неразыгранным.")
+
+        # Финальный embed
+        end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
+        finished_embeds = build_finished_giveaway_embed(
+            row["prize"],
+            row["description"],
+            len(participants),
+            winners_mentions,
+            end_dt
+        )
+        try:
+            await channel.send(embeds=finished_embeds)
+        except Exception as e:
+            await channel.send(embed=finished_embeds[1])
+            print(f"[ERROR] Не удалось отправить финальный embed: {e}")
+
+        await log_to_channel(
+            title="🏁 Розыгрыш завершён",
+            description=f"**ID:** `{gid}`\n**Приз:** {row['prize']}\n**Победители:** {winners_mentions}",
+            color=0xffaa00
+        )
+    except Exception as e:
+        print(f"[ERROR] finish_giveaway: {e}")
+        await log_to_channel("❌ Ошибка завершения розыгрыша", f"ID: {gid}\nОшибка: {e}", color=0xff0000)
 
 # ================= COMMANDS =================
 
@@ -690,7 +706,7 @@ async def list_giveaways(
 
 @bot.event
 async def on_ready():
-    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Призы и инвайты"))
+    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Инвайты и призы"))
 
     for guild in bot.guilds:
         await sync_invites(guild)
@@ -701,7 +717,7 @@ async def on_ready():
         gid = r["giveaway_id"]
         msg_id = r["message_id"]
         view = GiveawayView(gid)
-        bot.add_view(view, message_id=msg_id)   # <--- ПРИВЯЗЫВАЕМ К СООБЩЕНИЮ
+        bot.add_view(view, message_id=msg_id)
         asyncio.create_task(schedule_end(gid))
 
     await log_to_channel(
