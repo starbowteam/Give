@@ -9,7 +9,6 @@ from datetime import datetime, timezone, timedelta
 import re
 import ast
 
-# ================= TOKEN from ENV =================
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     print("❌ Ошибка: переменная окружения BOT_TOKEN не установлена.")
@@ -374,7 +373,7 @@ class GiveawayModal(ui.Modal):
         db.commit()
         gid = cur.lastrowid
         view = GiveawayView(gid)
-        bot.add_view(view)
+        bot.add_view(view, message_id=msg.id)  # <--- ПРИВЯЗЫВАЕМ К СООБЩЕНИЮ
         await msg.edit(view=view)
         asyncio.create_task(schedule_end(gid))
         await inter.edit_original_message(content=f"✅ Розыгрыш создан! **ID: `{gid}`**")
@@ -474,20 +473,17 @@ async def finish_giveaway(gid: int):
 
     winners_mentions = " ".join(f"<@{u}>" for u in winners) if winners else "Нет победителей 😔"
 
-    # --- Удаляем оригинальное сообщение ---
     try:
         msg = await channel.fetch_message(row["message_id"])
         await msg.delete()
     except Exception:
-        pass  # если не удалось – игнорируем
+        pass
 
-    # --- Текстовое сообщение с пингом победителя ---
     if winners:
         await channel.send(f"{winners_mentions} — выйграл! Напишите в течение 24 часов. После приз будет разыгран другому человеку.")
     else:
         await channel.send("😔 Победителей нет. Приз остаётся неразыгранным.")
 
-    # --- Финальный embed с новой картинкой ---
     end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
     finished_embeds = build_finished_giveaway_embed(
         row["prize"],
@@ -499,7 +495,7 @@ async def finish_giveaway(gid: int):
     try:
         await channel.send(embeds=finished_embeds)
     except Exception:
-        await channel.send(embed=finished_embeds[1])  # fallback
+        await channel.send(embed=finished_embeds[1])
 
     await log_to_channel(
         title="🏁 Розыгрыш завершён",
@@ -699,11 +695,13 @@ async def on_ready():
     for guild in bot.guilds:
         await sync_invites(guild)
 
-    active_rows = cur.execute("SELECT giveaway_id FROM giveaways WHERE status='active'").fetchall()
+    # Восстанавливаем активные розыгрыши
+    active_rows = cur.execute("SELECT giveaway_id, message_id FROM giveaways WHERE status='active'").fetchall()
     for r in active_rows:
         gid = r["giveaway_id"]
+        msg_id = r["message_id"]
         view = GiveawayView(gid)
-        bot.add_view(view)
+        bot.add_view(view, message_id=msg_id)   # <--- ПРИВЯЗЫВАЕМ К СООБЩЕНИЮ
         asyncio.create_task(schedule_end(gid))
 
     await log_to_channel(
