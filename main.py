@@ -112,7 +112,7 @@ async def sync_invites(guild: disnake.Guild):
 
 @bot.event
 async def on_ready():
-    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Giveaways 🎉"))
+    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Для розыгрышей"))
 
     # Проверяем, был ли уже выполнен сброс
     reset_done = cur.execute("SELECT value FROM settings WHERE key='invites_reset_done'").fetchone()
