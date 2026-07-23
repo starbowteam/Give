@@ -400,28 +400,14 @@ class JoinButton(disnake.ui.Button):
         try:
             row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=?", (self.gid,)).fetchone()
             if not row or row["status"] != "active":
-                await inter.edit_original_message(content=None)
+                await inter.edit_original_message(content="❌ Розыгрыш не найден или уже завершён.")
                 return
 
             participants = list_from_str(row["participants"])
             user_id = inter.user.id
-            prize = row["prize"]
 
             if user_id in participants:
-                participants.remove(user_id)
-                cur.execute("UPDATE giveaways SET participants=? WHERE giveaway_id=?", (str_from_list(participants), self.gid))
-                db.commit()
-                end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
-                embeds = build_giveaway_embeds(row["prize"], row["description"], row["winners_count"], len(participants), end_dt, row["required_invites"])
-                try:
-                    await inter.message.edit(embeds=embeds)
-                except Exception:
-                    pass
-                # Отправляем в ЛС
-                try:
-                    await inter.user.send(f"❎ Ты вышел из розыгрыша на приз: {prize} 🎉")
-                except:
-                    pass
+                # Уже участвует — просто игнорируем, ничего не отправляем
                 await inter.edit_original_message(content=None)
                 return
 
@@ -436,7 +422,7 @@ class JoinButton(disnake.ui.Button):
                 pass
             # Отправляем в ЛС
             try:
-                await inter.user.send(f"✅ Ты участвуешь в розыгрыше на приз: {prize} 🎉")
+                await inter.user.send(f"✅ Ты участвуешь в розыгрыше на приз: {row['prize']} 🎉")
             except:
                 pass
             await inter.edit_original_message(content=None)
@@ -526,6 +512,22 @@ async def finish_giveaway(gid: int):
         except Exception as e:
             await channel.send(embed=finished_embeds[1])
             print(f"[ERROR] Не удалось отправить финальный embed: {e}")
+
+        # Отправляем ЛС сообщения участникам
+        prize_name = row["prize"]
+        winner_ids = set(winners)
+        for uid in participants:
+            member = guild.get_member(uid)
+            if not member:
+                continue
+            if uid in winner_ids:
+                msg = f"🎉 Вы выиграли в розыгрыше на: {prize_name} . В течении 24 часов отпишите в личные сообщения <@796293832751972352>, иначе - приз будет разыгран."
+            else:
+                msg = f"🎉 Вы не заняли призовое место в розыгрыше на: {prize_name} . Постарайтесь еще раз в следующих розыгрышах!"
+            try:
+                await member.send(msg)
+            except:
+                pass
 
         await log_to_channel(
             title="🏁 Розыгрыш завершён",
@@ -723,7 +725,7 @@ async def list_giveaways(
 
 @bot.event
 async def on_ready():
-    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Мероприятия"))
+    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Призы и инвайты"))
 
     for guild in bot.guilds:
         await sync_invites(guild)
