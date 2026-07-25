@@ -14,7 +14,8 @@ if not TOKEN:
     print("❌ Ошибка: переменная окружения BOT_TOKEN не установлена.")
     exit(1)
 
-LOG_CHANNEL_ID = 1462418981825810535
+# === НОВЫЙ КАНАЛ ЛОГОВ ===
+LOG_CHANNEL_ID = 1530453804259082423
 
 intents = disnake.Intents.default()
 intents.members = True
@@ -72,15 +73,6 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
-
-CREATE TABLE IF NOT EXISTS reaction_roles (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id    INTEGER,
-    channel_id  INTEGER,
-    message_id  INTEGER,
-    emoji       TEXT,
-    role_id     INTEGER
-);
 """)
 db.commit()
 
@@ -90,23 +82,28 @@ try:
 except sqlite3.OperationalError:
     pass
 
-# ================= LOGGING =================
-async def log_to_channel(title: str, description: str, color: int = 0x00ff00, fields: list = None):
-    channel = bot.get_channel(LOG_CHANNEL_ID)
-    if not channel:
-        print(f"[WARN] Лог-канал {LOG_CHANNEL_ID} не найден")
-        return
-    embed = disnake.Embed(title=title, description=description, color=color, timestamp=datetime.now(timezone.utc))
-    if fields:
-        for name, value, inline in fields:
-            embed.add_field(name=name, value=value, inline=inline)
+# ================= LOGGING HELPER =================
+async def log_discord(title: str, description: str, color: int = 0x00ff00, fields: list = None):
     try:
+        channel = bot.get_channel(LOG_CHANNEL_ID)
+        if not channel:
+            channel = await bot.fetch_channel(LOG_CHANNEL_ID)
+        if not channel:
+            return
+        embed = disnake.Embed(
+            title=title,
+            description=description,
+            color=color,
+            timestamp=datetime.now(timezone.utc)
+        )
+        if fields:
+            for name, value, inline in fields:
+                embed.add_field(name=name, value=value, inline=inline)
         await channel.send(embed=embed)
     except Exception as e:
         print(f"[ERROR] Не удалось отправить лог: {e}")
 
 # ================= UTILS =================
-
 def now_ts():
     return int(datetime.now(timezone.utc).timestamp())
 
@@ -153,21 +150,11 @@ async def sync_invites(guild: disnake.Guild):
         )
     db.commit()
 
-# ================= AUTO-ROLE ON JOIN =================
+# ================= ОТСЛЕЖИВАНИЕ ИНВАЙТОВ (без автороли) =================
 @bot.event
 async def on_member_join(member: disnake.Member):
-    role = member.guild.get_role(1127428607606796290)
-    if role:
-        try:
-            await member.add_roles(role)
-            await log_to_channel(
-                title="👤 Автороль выдана",
-                description=f"Пользователь {member.mention} получил роль {role.mention}",
-                color=0x00aaff
-            )
-        except Exception as e:
-            print(f"[ERROR] Не удалось выдать роль: {e}")
-
+    # НЕ выдаём автороль – это делает основной бот
+    # Только отслеживаем инвайты для розыгрышей
     guild = member.guild
     snapshot_before = {row["invite_code"]: row for row in cur.execute("SELECT * FROM invites_snapshot WHERE guild_id=?", (guild.id,)).fetchall()}
     try:
@@ -192,6 +179,12 @@ async def on_member_join(member: disnake.Member):
     cur.execute("INSERT INTO invites (guild_id, inviter_id, member_id, joined_at, is_bot) VALUES (?, ?, ?, ?, ?)",
                 (guild.id, inviter_id, member.id, joined_at, is_bot))
     db.commit()
+    # Логируем использование инвайта (только один раз)
+    await log_discord(
+        title="📨 Использован инвайт (Giveaway)",
+        description=f"> **Пользователь:** {member.mention}\n> **Пригласил:** <@{inviter_id}>\n> **Код:** `{used_invite.code}`",
+        color=0x00aaff
+    )
 
 @bot.event
 async def on_member_remove(member: disnake.Member):
@@ -203,6 +196,11 @@ async def on_member_remove(member: disnake.Member):
     if row and (now_ts() - row["joined_at"]) < 600:
         cur.execute("UPDATE invites SET is_fake=1 WHERE guild_id=? AND member_id=? AND is_fake=0",
                     (guild.id, member.id))
+        await log_discord(
+            title="⚠️ Фейковый вход (Giveaway)",
+            description=f"> **Пользователь:** {member.mention}\n> Ушёл менее чем через 10 минут.",
+            color=0xff6600
+        )
     db.commit()
 
 @bot.event
@@ -216,59 +214,7 @@ async def on_invite_delete(invite: disnake.Invite):
     cur.execute("DELETE FROM invites_snapshot WHERE invite_code=?", (invite.code,))
     db.commit()
 
-# ================= REACTION ROLE EVENTS =================
-@bot.event
-async def on_raw_reaction_add(payload: disnake.RawReactionActionEvent):
-    if payload.member is None or payload.member.bot:
-        return
-    guild = bot.get_guild(payload.guild_id)
-    if not guild:
-        return
-    row = cur.execute(
-        "SELECT role_id FROM reaction_roles WHERE guild_id=? AND channel_id=? AND message_id=? AND emoji=?",
-        (payload.guild_id, payload.channel_id, payload.message_id, str(payload.emoji))
-    ).fetchone()
-    if row:
-        role = guild.get_role(row["role_id"])
-        if role:
-            try:
-                await payload.member.add_roles(role)
-                await log_to_channel(
-                    title="✅ Выдана реакционная роль",
-                    description=f"Пользователь {payload.member.mention} получил роль {role.mention} за реакцию {payload.emoji}",
-                    color=0x00ff00
-                )
-            except Exception as e:
-                print(f"[ERROR] Не удалось выдать роль: {e}")
-
-@bot.event
-async def on_raw_reaction_remove(payload: disnake.RawReactionActionEvent):
-    if payload.user_id == bot.user.id:
-        return
-    guild = bot.get_guild(payload.guild_id)
-    if not guild:
-        return
-    row = cur.execute(
-        "SELECT role_id FROM reaction_roles WHERE guild_id=? AND channel_id=? AND message_id=? AND emoji=?",
-        (payload.guild_id, payload.channel_id, payload.message_id, str(payload.emoji))
-    ).fetchone()
-    if row:
-        role = guild.get_role(row["role_id"])
-        if role:
-            member = guild.get_member(payload.user_id)
-            if member:
-                try:
-                    await member.remove_roles(role)
-                    await log_to_channel(
-                        title="❌ Снята реакционная роль",
-                        description=f"Пользователь {member.mention} лишился роли {role.mention} (снял реакцию {payload.emoji})",
-                        color=0xff0000
-                    )
-                except Exception as e:
-                    print(f"[ERROR] Не удалось снять роль: {e}")
-
 # ================= STATISTICS FUNCTIONS =================
-
 async def get_invite_stats(guild: disnake.Guild, user: disnake.Member, giveaway_id: int = None):
     if giveaway_id is None:
         rows = cur.execute("SELECT is_bot, left_at, is_fake, member_id FROM invites WHERE guild_id=? AND inviter_id=?",
@@ -308,7 +254,6 @@ def build_finished_giveaway_embed(prize, description, participants_count, winner
     embed_banner.set_image(
         url="https://cdn.discordapp.com/attachments/1462418981825810535/1529721309880258660/image.png?ex=6a62f77d&is=6a61a5fd&hm=195de5a268f76548d304db161adc041513e051f0938fcb62588ccd6801e374b2&"
     )
-
     desc_text = (
         f"{description}\n\n"
         f"**Приз:** {prize}\n"
@@ -327,7 +272,6 @@ def build_finished_giveaway_embed(prize, description, participants_count, winner
     return [embed_banner, embed_main]
 
 # ================= GIVEAWAY MODAL AND VIEWS =================
-
 class GiveawayModal(ui.Modal):
     def __init__(self):
         components = [
@@ -378,9 +322,9 @@ class GiveawayModal(ui.Modal):
         asyncio.create_task(schedule_end(gid))
         await inter.edit_original_message(content=f"✅ Розыгрыш создан! **ID: `{gid}`**")
 
-        await log_to_channel(
+        await log_discord(
             title="🎉 Создан розыгрыш",
-            description=f"**ID:** `{gid}`\n**Приз:** {prize}\n**Канал:** {inter.channel.mention}\n**Создал:** {inter.author.mention}\n**Завершится:** <t:{end_time}:F>",
+            description=f"> **ID:** `{gid}`\n> **Приз:** {prize}\n> **Канал:** {inter.channel.mention}\n> **Создал:** {inter.author.mention}\n> **Завершится:** <t:{end_time}:F>",
             color=0x00ff00
         )
 
@@ -396,21 +340,16 @@ class JoinButton(disnake.ui.Button):
 
     async def callback(self, inter: disnake.MessageInteraction):
         await inter.response.defer(ephemeral=True)
-
         try:
             row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=?", (self.gid,)).fetchone()
             if not row or row["status"] != "active":
                 await inter.edit_original_message(content="❌ Розыгрыш не найден или уже завершён.")
                 return
-
             participants = list_from_str(row["participants"])
             user_id = inter.user.id
-
             if user_id in participants:
-                # Уже участвует — просто игнорируем, ничего не отправляем
-                await inter.edit_original_message(content=None)
+                await inter.edit_original_message(content="❎ Ты уже участвуешь.")
                 return
-
             participants.append(user_id)
             cur.execute("UPDATE giveaways SET participants=? WHERE giveaway_id=?", (str_from_list(participants), self.gid))
             db.commit()
@@ -420,7 +359,7 @@ class JoinButton(disnake.ui.Button):
                 await inter.message.edit(embeds=embeds)
             except Exception:
                 pass
-            # Отправляем в ЛС
+            # ЛС сообщение
             try:
                 await inter.user.send(f"✅ Ты участвуешь в розыгрыше на приз: {row['prize']} 🎉")
             except:
@@ -444,23 +383,19 @@ async def finish_giveaway(gid: int):
         row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=?", (gid,)).fetchone()
         if not row or row["status"] != "active":
             return
-
         guild = bot.get_guild(row["guild_id"])
         if guild is None:
             print(f"[ERROR] Guild {row['guild_id']} не найден")
-            await log_to_channel("❌ Ошибка завершения", f"Гильдия {row['guild_id']} не найдена", color=0xff0000)
+            await log_discord("❌ Ошибка завершения", f"Гильдия {row['guild_id']} не найдена", color=0xff0000)
             return
-
         channel = guild.get_channel(row["channel_id"]) or bot.get_channel(row["channel_id"])
         if channel is None:
             print(f"[ERROR] Канал {row['channel_id']} не найден")
-            await log_to_channel("❌ Ошибка завершения", f"Канал {row['channel_id']} не найден", color=0xff0000)
+            await log_discord("❌ Ошибка завершения", f"Канал {row['channel_id']} не найден", color=0xff0000)
             return
-
         participants = list_from_str(row["participants"])
         winners_count = row["winners_count"]
         required_invites = row["required_invites"]
-
         valid_participants = []
         if required_invites > 0:
             for uid in participants:
@@ -475,30 +410,21 @@ async def finish_giveaway(gid: int):
                     valid_participants.append(uid)
         else:
             valid_participants = participants.copy()
-
         pool = valid_participants.copy()
         random.shuffle(pool)
         winners = pool[:winners_count]
-
         cur.execute("UPDATE giveaways SET winners=?, status='finished' WHERE giveaway_id=?", (str_from_list(winners), gid))
         db.commit()
-
         winners_mentions = " ".join(f"<@{u}>" for u in winners) if winners else "Нет победителей 😔"
-
-        # Удаляем оригинальное сообщение
         try:
             msg = await channel.fetch_message(row["message_id"])
             await msg.delete()
         except Exception as e:
             print(f"[WARN] Не удалось удалить сообщение: {e}")
-
-        # Текстовое сообщение с пингом
         if winners:
             await channel.send(f"{winners_mentions} — выйграл! Напишите в течение 24 часов. После приз будет разыгран другому человеку.")
         else:
             await channel.send("😔 Победителей нет. Приз остаётся неразыгранным.")
-
-        # Финальный embed
         end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
         finished_embeds = build_finished_giveaway_embed(
             row["prize"],
@@ -512,8 +438,7 @@ async def finish_giveaway(gid: int):
         except Exception as e:
             await channel.send(embed=finished_embeds[1])
             print(f"[ERROR] Не удалось отправить финальный embed: {e}")
-
-        # Отправляем ЛС сообщения участникам
+        # ЛС сообщения победителям и проигравшим
         prize_name = row["prize"]
         winner_ids = set(winners)
         for uid in participants:
@@ -528,18 +453,16 @@ async def finish_giveaway(gid: int):
                 await member.send(msg)
             except:
                 pass
-
-        await log_to_channel(
+        await log_discord(
             title="🏁 Розыгрыш завершён",
-            description=f"**ID:** `{gid}`\n**Приз:** {row['prize']}\n**Победители:** {winners_mentions}",
+            description=f"> **ID:** `{gid}`\n> **Приз:** {row['prize']}\n> **Победители:** {winners_mentions}",
             color=0xffaa00
         )
     except Exception as e:
         print(f"[ERROR] finish_giveaway: {e}")
-        await log_to_channel("❌ Ошибка завершения розыгрыша", f"ID: {gid}\nОшибка: {e}", color=0xff0000)
+        await log_discord("❌ Ошибка завершения розыгрыша", f"ID: {gid}\nОшибка: {e}", color=0xff0000)
 
 # ================= COMMANDS =================
-
 @bot.slash_command(name="giveaway", description="Создать розыгрыш", default_member_permissions=disnake.Permissions(administrator=True))
 async def giveaway(inter: disnake.ApplicationCommandInteraction):
     await inter.response.send_modal(GiveawayModal())
@@ -580,55 +503,10 @@ async def del_invites(inter: disnake.ApplicationCommandInteraction, user: disnak
     db.commit()
     embed = disnake.Embed(title="✅ Статистика сброшена", description=f"Все данные по инвайтам для {user.mention} удалены.", color=0x00ff00)
     await inter.send(embed=embed, ephemeral=True)
-    await log_to_channel(
+    await log_discord(
         title="🗑️ Сброс инвайтов",
         description=f"Админ {inter.author.mention} сбросил статистику инвайтов для {user.mention}",
         color=0xff6600
-    )
-
-@bot.slash_command(
-    name="reactionrole",
-    description="Управление реакционными ролями",
-    default_member_permissions=disnake.Permissions(administrator=True)
-)
-async def reactionrole(inter: disnake.ApplicationCommandInteraction):
-    pass
-
-@reactionrole.sub_command(name="add", description="Добавить реакционную роль")
-async def reactionrole_add(
-    inter: disnake.ApplicationCommandInteraction,
-    message_id: str = commands.Param(description="ID сообщения (можно скопировать в Discord)"),
-    emoji: str = commands.Param(description="Эмодзи (например, ✅ или <:имя:ID>)"),
-    role: disnake.Role = commands.Param(description="Роль, которая будет выдаваться")
-):
-    try:
-        msg = await inter.channel.fetch_message(int(message_id))
-    except Exception:
-        return await inter.send("❌ Сообщение не найдено в этом канале.", ephemeral=True)
-
-    cur.execute(
-        "INSERT INTO reaction_roles (guild_id, channel_id, message_id, emoji, role_id) VALUES (?, ?, ?, ?, ?)",
-        (inter.guild.id, inter.channel.id, int(message_id), emoji, role.id)
-    )
-    db.commit()
-
-    try:
-        await msg.add_reaction(parse_emoji(emoji))
-    except Exception as e:
-        await inter.send(f"⚠️ Не удалось поставить реакцию: {e}", ephemeral=True)
-        return
-
-    embed = disnake.Embed(
-        title="✅ Реакционная роль добавлена",
-        description=f"На сообщение {msg.jump_url} добавлена реакция {emoji}, выдающая роль {role.mention}.",
-        color=0x00ff00
-    )
-    await inter.send(embed=embed, ephemeral=True)
-
-    await log_to_channel(
-        title="➕ Добавлена реакционная роль",
-        description=f"Админ {inter.author.mention} создал реакцию {emoji} → {role.mention} на [сообщение]({msg.jump_url})",
-        color=0x00aaff
     )
 
 @bot.slash_command(
@@ -661,10 +539,9 @@ async def reroll(inter: disnake.ApplicationCommandInteraction, giveaway_id: int)
         if channel:
             await channel.send(embed=embed)
     await inter.response.send_message("✅ Reroll выполнен.", ephemeral=True)
-
-    await log_to_channel(
+    await log_discord(
         title="🔄 Reroll выполнен",
-        description=f"Для розыгрыша **#{giveaway_id}** (`{row['prize']}`) выбран новый победитель: <@{new_winner}>",
+        description=f"> **Розыгрыш #**`{giveaway_id}` (приз: {row['prize']}) новый победитель: <@{new_winner}>",
         color=0xff9900
     )
 
@@ -686,10 +563,7 @@ async def end_giveaway(inter: disnake.ApplicationCommandInteraction, giveaway_id
     description="Список розыгрышей",
     default_member_permissions=disnake.Permissions(administrator=True)
 )
-async def list_giveaways(
-    inter: disnake.ApplicationCommandInteraction,
-    статус: str = commands.Param(default="все", choices=["все", "активные", "завершённые"])
-):
+async def list_giveaways(inter: disnake.ApplicationCommandInteraction, статус: str = commands.Param(default="все", choices=["все", "активные", "завершённые"])):
     if статус == "активные":
         rows = cur.execute("SELECT * FROM giveaways WHERE guild_id=? AND status='active' ORDER BY giveaway_id DESC", (inter.guild.id,)).fetchall()
         title = "🟢 Активные розыгрыши"
@@ -722,14 +596,15 @@ async def list_giveaways(
     await inter.send(embed=embed, ephemeral=True)
 
 # ================= ON_READY =================
-
 @bot.event
 async def on_ready():
-    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Призы и инвайты"))
-
+    await bot.change_presence(
+        status=disnake.Status.online,
+        activity=disnake.Game("Розыгрыши")
+    )
+    # Синхронизация инвайтов для всех гильдий
     for guild in bot.guilds:
         await sync_invites(guild)
-
     # Восстанавливаем активные розыгрыши
     active_rows = cur.execute("SELECT giveaway_id, message_id FROM giveaways WHERE status='active'").fetchall()
     for r in active_rows:
@@ -738,14 +613,12 @@ async def on_ready():
         view = GiveawayView(gid)
         bot.add_view(view, message_id=msg_id)
         asyncio.create_task(schedule_end(gid))
-
-    await log_to_channel(
+    # Логируем запуск только один раз
+    await log_discord(
         "✅ Бот запущен",
-        f"**{bot.user}** готов к работе.\nАктивных розыгрышей: {len(active_rows)}",
+        f"> **{bot.user}** готов к работе.\n> Активных розыгрышей: {len(active_rows)}",
         color=0x00ff00
     )
     print(f"✅ Bot ready as {bot.user} | Активных розыгрышей: {len(active_rows)}")
-
-# ================= RUN =================
 
 bot.run(TOKEN)
