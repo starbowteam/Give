@@ -14,10 +14,7 @@ if not TOKEN:
     print("❌ Ошибка: переменная окружения BOT_TOKEN не установлена.")
     exit(1)
 
-# === НОВЫЙ КАНАЛ ЛОГОВ ===
 LOG_CHANNEL_ID = 1530453804259082423
-
-# === РОЛИ ДЛЯ GIVEAWAY ===
 GIVEAWAY_ROLES = [1530823425764098058, 1471844291595731016, 1127428607606796294]
 ADMIN_ROLES = [1127428607606796294, 1471844291595731016, 1530822331188903966]
 
@@ -83,7 +80,11 @@ CREATE TABLE IF NOT EXISTS settings (
 """)
 db.commit()
 
-# Добавляем новые колонки, если их нет
+try:
+    cur.execute("ALTER TABLE giveaways ADD COLUMN created_at INTEGER")
+    db.commit()
+except sqlite3.OperationalError:
+    pass
 try:
     cur.execute("ALTER TABLE giveaways ADD COLUMN valid_participants TEXT")
     db.commit()
@@ -100,13 +101,7 @@ try:
 except sqlite3.OperationalError:
     pass
 
-try:
-    cur.execute("ALTER TABLE giveaways ADD COLUMN created_at INTEGER")
-    db.commit()
-except sqlite3.OperationalError:
-    pass
-
-# ================= LOGGING HELPER =================
+# ================= LOGGING =================
 async def log_discord(title: str, description: str, color: int = 0x00ff00, fields: list = None):
     try:
         channel = bot.get_channel(LOG_CHANNEL_ID)
@@ -114,12 +109,7 @@ async def log_discord(title: str, description: str, color: int = 0x00ff00, field
             channel = await bot.fetch_channel(LOG_CHANNEL_ID)
         if not channel:
             return
-        embed = disnake.Embed(
-            title=title,
-            description=description,
-            color=color,
-            timestamp=datetime.now(timezone.utc)
-        )
+        embed = disnake.Embed(title=title, description=description, color=color, timestamp=datetime.now(timezone.utc))
         if fields:
             for name, value, inline in fields:
                 embed.add_field(name=name, value=value, inline=inline)
@@ -167,10 +157,8 @@ async def sync_invites(guild: disnake.Guild):
     except Exception:
         return
     for inv in invites:
-        cur.execute(
-            "REPLACE INTO invites_snapshot (invite_code, guild_id, uses, inviter_id) VALUES (?, ?, ?, ?)",
-            (inv.code, guild.id, inv.uses, inv.inviter.id if inv.inviter else None)
-        )
+        cur.execute("REPLACE INTO invites_snapshot (invite_code, guild_id, uses, inviter_id) VALUES (?, ?, ?, ?)",
+                    (inv.code, guild.id, inv.uses, inv.inviter.id if inv.inviter else None))
     db.commit()
 
 @bot.event
@@ -233,7 +221,7 @@ async def on_invite_delete(invite: disnake.Invite):
     cur.execute("DELETE FROM invites_snapshot WHERE invite_code=?", (invite.code,))
     db.commit()
 
-# ================= STATISTICS FUNCTIONS =================
+# ================= STATISTICS =================
 async def get_invite_stats(guild: disnake.Guild, user: disnake.Member, giveaway_id: int = None):
     if giveaway_id is None:
         rows = cur.execute("SELECT is_bot, left_at, is_fake, member_id FROM invites WHERE guild_id=? AND inviter_id=?",
@@ -249,13 +237,9 @@ async def get_invite_stats(guild: disnake.Guild, user: disnake.Member, giveaway_
     remaining = sum(1 for r in rows if r["left_at"] is None and r["member_id"] != 0)
     left = sum(1 for r in rows if r["left_at"] is not None)
     bots = sum(1 for r in rows if r["is_bot"] == 1)
-    return {
-        "total": total,
-        "remaining": remaining,
-        "left": left,
-        "bots": bots,
-    }
+    return {"total": total, "remaining": remaining, "left": left, "bots": bots}
 
+# ================= EMBED BUILDERS =================
 def build_giveaway_embeds(prize, description, winners_count, participants_count, end_dt, required_invites=0):
     end_ts = int(end_dt.timestamp())
     embed_banner = disnake.Embed(color=6776679)
@@ -270,27 +254,13 @@ def build_giveaway_embeds(prize, description, winners_count, participants_count,
 def build_finished_giveaway_embed(prize, description, participants_count, winners_mentions, end_dt):
     end_ts = int(end_dt.timestamp())
     embed_banner = disnake.Embed(color=6776679)
-    embed_banner.set_image(
-        url="https://cdn.discordapp.com/attachments/1462418981825810535/1529721309880258660/image.png?ex=6a62f77d&is=6a61a5fd&hm=195de5a268f76548d304db161adc041513e051f0938fcb62588ccd6801e374b2&"
-    )
-    desc_text = (
-        f"{description}\n\n"
-        f"**Приз:** {prize}\n"
-        f"**Участвовали:** {participants_count}\n"
-        f"**Победитель:** {winners_mentions}\n"
-        f"**Закончено:** <t:{end_ts}:F>"
-    )
-    embed_main = disnake.Embed(
-        title="🎉 Розыгрыш завершен!",
-        description=desc_text,
-        color=6776679
-    )
-    embed_main.set_image(
-        url="https://cdn.discordapp.com/attachments/1223595469746475049/1459289685405728951/image_2026-01-10_00-22-10.png"
-    )
+    embed_banner.set_image(url="https://cdn.discordapp.com/attachments/1462418981825810535/1529721309880258660/image.png?ex=6a62f77d&is=6a61a5fd&hm=195de5a268f76548d304db161adc041513e051f0938fcb62588ccd6801e374b2&")
+    desc_text = (f"{description}\n\n**Приз:** {prize}\n**Участвовали:** {participants_count}\n**Победитель:** {winners_mentions}\n**Закончено:** <t:{end_ts}:F>")
+    embed_main = disnake.Embed(title="🎉 Розыгрыш завершен!", description=desc_text, color=6776679)
+    embed_main.set_image(url="https://cdn.discordapp.com/attachments/1223595469746475049/1459289685405728951/image_2026-01-10_00-22-10.png")
     return [embed_banner, embed_main]
 
-# ================= GIVEAWAY MODAL AND VIEWS =================
+# ================= MODAL AND VIEWS =================
 class GiveawayModal(ui.Modal):
     def __init__(self):
         components = [
@@ -342,7 +312,6 @@ class GiveawayModal(ui.Modal):
         await msg.edit(view=view)
         asyncio.create_task(schedule_end(gid))
         await inter.edit_original_message(content=f"✅ Розыгрыш создан! **ID: `{gid}`**")
-
         await log_discord(
             title="🎉 Создан розыгрыш",
             description=f"> **ID:** `{gid}`\n> **Приз:** {prize}\n> **Канал:** {inter.channel.mention}\n> **Создал:** {inter.author.mention}\n> **Завершится:** <t:{end_time}:F>",
@@ -404,13 +373,11 @@ async def finish_giveaway(gid: int):
         if not row or row["status"] != "active":
             return
         guild = bot.get_guild(row["guild_id"])
-        if guild is None:
-            print(f"[ERROR] Guild {row['guild_id']} не найден")
+        if not guild:
             await log_discord("❌ Ошибка завершения", f"Гильдия {row['guild_id']} не найдена", color=0xff0000)
             return
         channel = guild.get_channel(row["channel_id"]) or bot.get_channel(row["channel_id"])
-        if channel is None:
-            print(f"[ERROR] Канал {row['channel_id']} не найден")
+        if not channel:
             await log_discord("❌ Ошибка завершения", f"Канал {row['channel_id']} не найден", color=0xff0000)
             return
 
@@ -418,7 +385,6 @@ async def finish_giveaway(gid: int):
         winners_count = row["winners_count"]
         required_invites = row["required_invites"]
 
-        # Определяем валидных участников (по инвайтам)
         valid_participants = []
         if required_invites > 0:
             for uid in participants:
@@ -438,7 +404,6 @@ async def finish_giveaway(gid: int):
         random.shuffle(pool)
         winners = pool[:winners_count]
 
-        # Сохраняем победителей и валидных участников в БД
         cur.execute("UPDATE giveaways SET winners=?, status='finished', valid_participants=? WHERE giveaway_id=?",
                     (str_from_list(winners), str_from_list(valid_participants), gid))
         db.commit()
@@ -452,13 +417,13 @@ async def finish_giveaway(gid: int):
         except Exception as e:
             print(f"[WARN] Не удалось удалить сообщение: {e}")
 
-        # Отправляем текстовое сообщение с пингом
+        # Текстовое сообщение
         if winners:
             text_msg = await channel.send(f"{winners_mentions} — выйграл! Напишите в течение 24 часов. После приз будет разыгран другому человеку.")
         else:
             text_msg = await channel.send("😔 Победителей нет. Приз остаётся неразыгранным.")
 
-        # Отправляем финальный embed
+        # Финальный embed
         end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
         finished_embeds = build_finished_giveaway_embed(
             row["prize"],
@@ -469,12 +434,10 @@ async def finish_giveaway(gid: int):
         )
         embed_msg = await channel.send(embeds=finished_embeds)
 
-        # Сохраняем ID финальных сообщений
         cur.execute("UPDATE giveaways SET final_text_id=?, final_embed_id=? WHERE giveaway_id=?",
                     (text_msg.id, embed_msg.id, gid))
         db.commit()
 
-        # ЛС сообщения участникам (без изменений)
         prize_name = row["prize"]
         winner_ids = set(winners)
         for uid in participants:
@@ -524,16 +487,12 @@ async def invites(inter: disnake.ApplicationCommandInteraction, user: disnake.Me
     else:
         title = f"📨 Инвайты — {user.display_name}"
         footer = "Статистика с текущего запуска"
-    embed = disnake.Embed(
-        title=title,
-        color=6776679,
-        description=(
-            f"**На сервере:** {stats['remaining']}\n"
-            f"**Ушло:** {stats['left']}\n"
-            f"**Ботов:** {stats['bots']}\n"
-            f"**Всего:** {stats['total']}"
-        )
-    )
+    embed = disnake.Embed(title=title, color=6776679, description=(
+        f"**На сервере:** {stats['remaining']}\n"
+        f"**Ушло:** {stats['left']}\n"
+        f"**Ботов:** {stats['bots']}\n"
+        f"**Всего:** {stats['total']}"
+    ))
     embed.set_thumbnail(url=user.display_avatar.url)
     embed.set_footer(text=footer)
     await inter.send(embed=embed, ephemeral=True)
@@ -552,15 +511,11 @@ async def del_invites(inter: disnake.ApplicationCommandInteraction, user: disnak
         color=0xff6600
     )
 
-@bot.slash_command(
-    name="reroll",
-    description="Выбрать нового победителя"
-)
+@bot.slash_command(name="reroll", description="Выбрать нового победителя")
 async def reroll(inter: disnake.ApplicationCommandInteraction, giveaway_id: int):
     if not any(r.id in GIVEAWAY_ROLES for r in inter.author.roles):
         return await inter.send("⛔ У вас нет прав на reroll.", ephemeral=True)
 
-    # Получаем данные розыгрыша
     row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=?", (giveaway_id,)).fetchone()
     if not row:
         return await inter.response.send_message("❌ Розыгрыш не найден.", ephemeral=True)
@@ -574,22 +529,23 @@ async def reroll(inter: disnake.ApplicationCommandInteraction, giveaway_id: int)
     if not channel:
         return await inter.response.send_message("❌ Канал не найден.", ephemeral=True)
 
-    # Список валидных участников (которые подходили по инвайтам)
     valid_participants = list_from_str(row["valid_participants"]) if row["valid_participants"] else []
     if not valid_participants:
         return await inter.response.send_message("❌ Нет валидных участников для reroll.", ephemeral=True)
 
-    # Уже выигравшие
+    # Уже выигравшие (старые победители)
     old_winners = list_from_str(row["winners"])
-    # Кандидаты на новый reroll (валидные участники, не бывшие победителями)
+    # Кандидаты – валидные, не бывшие победителями
     pool = [u for u in valid_participants if u not in old_winners]
     if not pool:
         return await inter.response.send_message("❌ Нет участников для reroll (все валидные уже выиграли).", ephemeral=True)
 
-    # Выбираем нового победителя
-    new_winner = random.choice(pool)
+    # Сколько победителей было изначально
+    winners_count = row["winners_count"]
+    # Выбираем новых победителей (столько же, сколько было)
+    random.shuffle(pool)
+    new_winners = pool[:winners_count]
     # Обновляем список победителей
-    new_winners = old_winners + [new_winner]
     cur.execute("UPDATE giveaways SET winners=? WHERE giveaway_id=?", (str_from_list(new_winners), giveaway_id))
     db.commit()
 
@@ -609,15 +565,12 @@ async def reroll(inter: disnake.ApplicationCommandInteraction, giveaway_id: int)
     except Exception as e:
         print(f"[WARN] Не удалось удалить старый embed: {e}")
 
-    # Формируем новый список победителей для отображения
+    # Формируем новые финальные сообщения
     winners_mentions = " ".join(f"<@{u}>" for u in new_winners) if new_winners else "Нет победителей 😔"
     prize = row["prize"]
     description = row["description"] or ""
 
-    # Отправляем новое текстовое сообщение с пингом
     text_msg = await channel.send(f"{winners_mentions} — выйграл! Напишите в течение 24 часов. После приз будет разыгран другому человеку.")
-
-    # Отправляем новый embed
     end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
     finished_embeds = build_finished_giveaway_embed(
         prize,
@@ -628,30 +581,27 @@ async def reroll(inter: disnake.ApplicationCommandInteraction, giveaway_id: int)
     )
     embed_msg = await channel.send(embeds=finished_embeds)
 
-    # Обновляем ID финальных сообщений в БД
     cur.execute("UPDATE giveaways SET final_text_id=?, final_embed_id=? WHERE giveaway_id=?",
                 (text_msg.id, embed_msg.id, giveaway_id))
     db.commit()
 
-    # ЛС новому победителю
-    try:
-        member = guild.get_member(new_winner)
+    # ЛС новым победителям
+    for uid in new_winners:
+        member = guild.get_member(uid)
         if member:
-            await member.send(f"🎉 В результате реролла вы выиграли в розыгрыше на: {prize} . В течении 24 часов отпишите в личные сообщения <@796293832751972352>, иначе - приз будет разыгран.")
-    except Exception as e:
-        print(f"[ERROR] Не удалось отправить ЛС новому победителю: {e}")
+            try:
+                await member.send(f"🎉 В результате реролла вы выиграли в розыгрыше на: {prize} . В течении 24 часов отпишите в личные сообщения <@796293832751972352>, иначе - приз будет разыгран.")
+            except Exception as e:
+                print(f"[ERROR] Не удалось отправить ЛС новому победителю {uid}: {e}")
 
     await inter.response.send_message("✅ Reroll выполнен.", ephemeral=True)
     await log_discord(
         title="🔄 Reroll выполнен",
-        description=f"> **Розыгрыш #**`{giveaway_id}` (приз: {row['prize']})\n> **Новый победитель:** <@{new_winner}>",
+        description=f"> **Розыгрыш #**`{giveaway_id}` (приз: {row['prize']})\n> **Новые победители:** {winners_mentions}",
         color=0xff9900
     )
 
-@bot.slash_command(
-    name="end_giveaway",
-    description="Принудительно завершить розыгрыш"
-)
+@bot.slash_command(name="end_giveaway", description="Принудительно завершить розыгрыш")
 async def end_giveaway(inter: disnake.ApplicationCommandInteraction, giveaway_id: int):
     if not any(r.id in GIVEAWAY_ROLES for r in inter.author.roles):
         return await inter.send("⛔ У вас нет прав на завершение розыгрыша.", ephemeral=True)
@@ -662,10 +612,7 @@ async def end_giveaway(inter: disnake.ApplicationCommandInteraction, giveaway_id
     await finish_giveaway(giveaway_id)
     await inter.edit_original_message(content="✅ Розыгрыш завершён.")
 
-@bot.slash_command(
-    name="list_giveaways",
-    description="Список розыгрышей"
-)
+@bot.slash_command(name="list_giveaways", description="Список розыгрышей")
 async def list_giveaways(inter: disnake.ApplicationCommandInteraction, статус: str = commands.Param(default="все", choices=["все", "активные", "завершённые"])):
     if not any(r.id in GIVEAWAY_ROLES for r in inter.author.roles):
         return await inter.send("⛔ У вас нет прав на просмотр списка розыгрышей.", ephemeral=True)
@@ -703,10 +650,7 @@ async def list_giveaways(inter: disnake.ApplicationCommandInteraction, стат�
 # ================= ON_READY =================
 @bot.event
 async def on_ready():
-    await bot.change_presence(
-        status=disnake.Status.online,
-        activity=disnake.Game("Giveaways 🎉")
-    )
+    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Giveaways 🎉"))
     for guild in bot.guilds:
         await sync_invites(guild)
     active_rows = cur.execute("SELECT giveaway_id, message_id FROM giveaways WHERE status='active'").fetchall()
