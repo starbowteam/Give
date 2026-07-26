@@ -236,7 +236,7 @@ def build_giveaway_embeds(prize, description, winners_count, participants_count,
     if required_invites:
         desc_text += f"\n**Требуется инвайтов:** {required_invites}"
     embed_main = disnake.Embed(title="🎉 Розыгрыш", description=desc_text, color=6776679)
-    embed_main.set_image(url="https://cdn.discordapp.com/attachments/1223595469746475049/1459289685405728951/image_2026-01-10_00-22-10.png")
+    embed_main.set_image(url="https://cdn.discordapp.com/attachments/1527006158282555412/1530795801268453447/pisk.png?ex=6a66e02f&is=6a658eaf&hm=79e41273327d2e1048ba42df62868cbb88f5b06b112ca864de2c7a02326523e9&")
     return [embed_banner, embed_main]
 
 def build_finished_giveaway_embed(prize, description, participants_count, winners_mentions, end_dt):
@@ -245,7 +245,7 @@ def build_finished_giveaway_embed(prize, description, participants_count, winner
     embed_banner.set_image(url="https://cdn.discordapp.com/attachments/1462418981825810535/1529721309880258660/image.png?ex=6a62f77d&is=6a61a5fd&hm=195de5a268f76548d304db161adc041513e051f0938fcb62588ccd6801e374b2&")
     desc_text = (f"{description}\n\n**Приз:** {prize}\n**Участвовали:** {participants_count}\n**Победитель:** {winners_mentions}\n**Закончено:** <t:{end_ts}:F>")
     embed_main = disnake.Embed(title="🎉 Розыгрыш завершен!", description=desc_text, color=6776679)
-    embed_main.set_image(url="https://cdn.discordapp.com/attachments/1223595469746475049/1459289685405728951/image_2026-01-10_00-22-10.png")
+    embed_main.set_image(url="https://cdn.discordapp.com/attachments/1527006158282555412/1530795801268453447/pisk.png?ex=6a66e02f&is=6a658eaf&hm=79e41273327d2e1048ba42df62868cbb88f5b06b112ca864de2c7a02326523e9&")
     return [embed_banner, embed_main]
 
 # ================= MODAL AND VIEWS =================
