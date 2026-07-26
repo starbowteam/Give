@@ -16,7 +16,8 @@ if not TOKEN:
 
 LOG_CHANNEL_ID = 1530453804259082423
 
-# Роли для полного доступа к Giveaway (создание, завершение, реролл, удаление)
+# Роли для полного доступа к Giveaway (команды будут видны только обладателям права manage_messages)
+# Право manage_messages нужно дать роли 1530823425764098058 и другим административным ролям
 GIVEAWAY_FULL_ROLES = [1530823425764098058, 1530822331188903966, 1127428607606796294, 1471844291595731016]
 
 intents = disnake.Intents.default()
@@ -81,7 +82,6 @@ CREATE TABLE IF NOT EXISTS settings (
 """)
 db.commit()
 
-# Дополнительные колонки
 for col in ["created_at", "valid_participants", "final_text_id", "final_embed_id"]:
     try:
         cur.execute(f"ALTER TABLE giveaways ADD COLUMN {col} TEXT")
@@ -448,16 +448,23 @@ async def finish_giveaway(gid: int):
         await log_discord("❌ Ошибка завершения розыгрыша", f"ID: {gid}\nОшибка: {e}", color=0xff0000)
 
 # ================= COMMANDS =================
-# Команды с полным доступом (кроме /invites)
-@bot.slash_command(name="giveaway", description="Создать розыгрыш")
+# Команды с полным доступом (видны только с правами manage_messages)
+@bot.slash_command(
+    name="giveaway",
+    description="Создать розыгрыш",
+    default_member_permissions=disnake.Permissions(manage_messages=True)
+)
 async def giveaway(inter: disnake.ApplicationCommandInteraction):
     if not any(r.id in GIVEAWAY_FULL_ROLES for r in inter.author.roles):
         return await inter.send("⛔ У вас нет прав на создание розыгрышей.", ephemeral=True)
     await inter.response.send_modal(GiveawayModal())
 
-@bot.slash_command(name="invites", description="Статистика инвайтов пользователя")
+@bot.slash_command(
+    name="invites",
+    description="Статистика инвайтов пользователя"
+)
 async def invites(inter: disnake.ApplicationCommandInteraction, user: disnake.Member = None, giveaway_id: int = None):
-    # Доступна всем без проверки ролей
+    # Доступна всем без прав
     user = user or inter.author
     if giveaway_id is not None:
         g_row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=? AND guild_id=?", (giveaway_id, inter.guild.id)).fetchone()
@@ -482,7 +489,11 @@ async def invites(inter: disnake.ApplicationCommandInteraction, user: disnake.Me
     embed.set_footer(text=footer)
     await inter.send(embed=embed, ephemeral=True)
 
-@bot.slash_command(name="del_invites", description="Удаление инвайтов за что-либо (сброс статистики пользователя)")
+@bot.slash_command(
+    name="del_invites",
+    description="Удаление инвайтов за что-либо (сброс статистики пользователя)",
+    default_member_permissions=disnake.Permissions(manage_messages=True)
+)
 async def del_invites(inter: disnake.ApplicationCommandInteraction, user: disnake.Member):
     if not any(r.id in GIVEAWAY_FULL_ROLES for r in inter.author.roles):
         return await inter.send("⛔ У вас нет прав на сброс инвайтов.", ephemeral=True)
@@ -496,7 +507,11 @@ async def del_invites(inter: disnake.ApplicationCommandInteraction, user: disnak
         color=0xff6600
     )
 
-@bot.slash_command(name="reroll", description="Выбрать нового победителя")
+@bot.slash_command(
+    name="reroll",
+    description="Выбрать нового победителя",
+    default_member_permissions=disnake.Permissions(manage_messages=True)
+)
 async def reroll(inter: disnake.ApplicationCommandInteraction, giveaway_id: int):
     if not any(r.id in GIVEAWAY_FULL_ROLES for r in inter.author.roles):
         return await inter.send("⛔ У вас нет прав на reroll.", ephemeral=True)
@@ -578,7 +593,11 @@ async def reroll(inter: disnake.ApplicationCommandInteraction, giveaway_id: int)
         color=0xff9900
     )
 
-@bot.slash_command(name="end_giveaway", description="Принудительно завершить розыгрыш")
+@bot.slash_command(
+    name="end_giveaway",
+    description="Принудительно завершить розыгрыш",
+    default_member_permissions=disnake.Permissions(manage_messages=True)
+)
 async def end_giveaway(inter: disnake.ApplicationCommandInteraction, giveaway_id: int):
     if not any(r.id in GIVEAWAY_FULL_ROLES for r in inter.author.roles):
         return await inter.send("⛔ У вас нет прав на завершение розыгрыша.", ephemeral=True)
@@ -589,7 +608,11 @@ async def end_giveaway(inter: disnake.ApplicationCommandInteraction, giveaway_id
     await finish_giveaway(giveaway_id)
     await inter.edit_original_message(content="✅ Розыгрыш завершён.")
 
-@bot.slash_command(name="list_giveaways", description="Список розыгрышей")
+@bot.slash_command(
+    name="list_giveaways",
+    description="Список розыгрышей",
+    default_member_permissions=disnake.Permissions(manage_messages=True)
+)
 async def list_giveaways(inter: disnake.ApplicationCommandInteraction, статус: str = commands.Param(default="все", choices=["все", "активные", "завершённые"])):
     if not any(r.id in GIVEAWAY_FULL_ROLES for r in inter.author.roles):
         return await inter.send("⛔ У вас нет прав на просмотр списка розыгрышей.", ephemeral=True)
@@ -637,11 +660,4 @@ async def on_ready():
         view = GiveawayView(gid)
         bot.add_view(view, message_id=msg_id)
         asyncio.create_task(schedule_end(gid))
-    await log_discord(
-        "✅ Бот запущен",
-        f"> **{bot.user}** готов к работе.\n> Активных розыгрышей: {len(active_rows)}",
-        color=0x00ff00
-    )
-    print(f"✅ Bot ready as {bot.user} | Активных розыгрышей: {len(active_rows)}")
-
-bot.run(TOKEN)
+   
