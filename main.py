@@ -660,4 +660,11 @@ async def on_ready():
         view = GiveawayView(gid)
         bot.add_view(view, message_id=msg_id)
         asyncio.create_task(schedule_end(gid))
-   
+    await log_discord(
+        "✅ Бот запущен",
+        f"> **{bot.user}** готов к работе.\n> Активных розыгрышей: {len(active_rows)}",
+        color=0x00ff00
+    )
+    print(f"✅ Bot ready as {bot.user} | Активных розыгрышей: {len(active_rows)}")
+
+bot.run(TOKEN)
