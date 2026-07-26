@@ -650,7 +650,7 @@ async def list_giveaways(inter: disnake.ApplicationCommandInteraction, стат�
 # ================= ON_READY =================
 @bot.event
 async def on_ready():
-    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Giveaways 🎉"))
+    await bot.change_presence(status=disnake.Status.online, activity=disnake.Game("Розыгрыши"))
     for guild in bot.guilds:
         await sync_invites(guild)
     active_rows = cur.execute("SELECT giveaway_id, message_id FROM giveaways WHERE status='active'").fetchall()
