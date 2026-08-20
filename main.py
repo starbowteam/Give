@@ -9,7 +9,7 @@ import random
 from datetime import datetime, timezone, timedelta
 import re
 import ast
-import io  # <-- ДОБАВЛЕНО для создания txt-файла в памяти
+import io  # для создания txt-файла в памяти
 
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
@@ -396,7 +396,6 @@ async def get_valid_participants(gid: int, guild: disnake.Guild):
             stats = await get_invite_stats(guild, member, giveaway_id=gid)
             if stats is None:
                 continue
-            # Используем сумму всех приглашённых за период (включая ушедших)
             if stats["total"] < required_invites:
                 continue
         valid.append(uid)
@@ -412,7 +411,7 @@ async def schedule_end(gid: int):
         await asyncio.sleep(delay)
     await finish_giveaway(gid)
 
-# ================= ОБНОВЛЁННАЯ ФУНКЦИЯ ЗАВЕРШЕНИЯ (С ФАЙЛОМ) =================
+# ================= ОБНОВЛЁННАЯ ФУНКЦИЯ ЗАВЕРШЕНИЯ (С ФАЙЛОМ ПОБЕДИТЕЛЕЙ В ЛОГ-КАНАЛ) =================
 async def finish_giveaway(gid: int):
     try:
         row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=?", (gid,)).fetchone()
@@ -431,7 +430,7 @@ async def finish_giveaway(gid: int):
 
         # ---- ПОЛУЧАЕМ АКТУАЛЬНЫЙ СПИСОК ВАЛИДНЫХ УЧАСТНИКОВ ----
         valid_participants = await get_valid_participants(gid, guild)
-        participants = list_from_str(row["participants"])  # все участники (для файла и статистики)
+        participants = list_from_str(row["participants"])  # все участники (для статистики)
         winners_count = row["winners_count"]
 
         # Выбираем победителей из валидных
@@ -465,12 +464,16 @@ async def finish_giveaway(gid: int):
         cur.execute("UPDATE giveaways SET final_embed_id=? WHERE giveaway_id=?", (embed_msg.id, gid))
         db.commit()
 
-        # ---- ОТПРАВКА TXT-ФАЙЛА СО СПИСКОМ ВСЕХ УЧАСТНИКОВ (чистые ID) ----
-        if participants:
-            content = "\n".join(str(uid) for uid in participants)
+        # ---- ОТПРАВКА TXT-ФАЙЛА СО СПИСКОМ ПОБЕДИТЕЛЕЙ (чистые ID) В ЛОГ-КАНАЛ ----
+        if winners:
+            content = "\n".join(str(uid) for uid in winners)
             file_data = io.BytesIO(content.encode("utf-8"))
-            file = disnake.File(file_data, filename=f"участники_{gid}.txt")
-            await channel.send(file=file)
+            file = disnake.File(file_data, filename=f"победители_{gid}.txt")
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                await log_channel.send(file=file)
+            else:
+                await log_discord("❌ Ошибка отправки файла", f"Лог-канал {LOG_CHANNEL_ID} не найден", color=0xff0000)
 
         # ---- РАССЫЛКА ЛИЧНЫХ СООБЩЕНИЙ ----
         prize_name = row["prize"]
@@ -565,8 +568,14 @@ async def reroll_giveaway(inter, gid: int):
     cur.execute("UPDATE giveaways SET final_embed_id=? WHERE giveaway_id=?", (embed_msg.id, gid))
     db.commit()
 
-    # После реролла тоже можно отправить обновлённый файл с участниками (опционально)
-    # Но по запросу файл только при первом завершении, поэтому не дублируем.
+    # ---- Отправляем файл с новыми победителями в лог-канал (опционально) ----
+    if new_winners:
+        content = "\n".join(str(uid) for uid in new_winners)
+        file_data = io.BytesIO(content.encode("utf-8"))
+        file = disnake.File(file_data, filename=f"победители_reroll_{gid}.txt")
+        log_channel = bot.get_channel(LOG_CHANNEL_ID)
+        if log_channel:
+            await log_channel.send(file=file)
 
     for uid in new_winners:
         member = guild.get_member(uid)
