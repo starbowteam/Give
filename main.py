@@ -624,7 +624,7 @@ class GiveawaySelect(disnake.ui.StringSelect):
             disnake.SelectOption(
                 label="・Перевыбрать победителя",
                 description="Перевыбрать победителя в розыгрыше",
-                emoji="<:restart:1538401342391853118>",
+                emoji="<:restart:1553231421190049813>",
                 value="reroll"
             )
         ]
