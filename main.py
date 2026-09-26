@@ -300,7 +300,7 @@ async def get_invite_stats(guild: disnake.Guild, user: disnake.Member, giveaway_
             return None
 
 # ============================================================
-# EMBED BUILDERS (> формат)
+# EMBED BUILDERS
 # ============================================================
 IMG_BANNER_GW = "https://cdn.discordapp.com/attachments/1527006158282555412/1529678932742508674/image.png?ex=6a62d005&is=6a617e85&hm=b524115aa4edc9de6ec5aad871f9a32c7ffe37c6d45b5da1718b2803d986bd52&"
 IMG_STRIPE_GW = "https://cdn.discordapp.com/attachments/1527006158282555412/1530795801268453447/pisk.png?ex=6a66e02f&is=6a658eaf&hm=79e41273327d2e1048ba42df62868cbb88f5b06b112ca864de2c7a02326523e9&"
@@ -340,7 +340,7 @@ def build_finished_giveaway_embed(prize, description, participants_count, winner
     return [embed_banner, embed_main]
 
 # ============================================================
-# МОДАЛКА СОЗДАНИЯ
+# МОДАЛКА РУЧНОГО СОЗДАНИЯ
 # ============================================================
 class GiveawayModal(ui.Modal):
     def __init__(self):
@@ -387,13 +387,16 @@ class GiveawayModal(ui.Modal):
         end_time = int(end_dt_utc.timestamp())
         created_at = now_ts()
         embeds = build_giveaway_embeds(prize, description, winners_count, 0, end_dt_utc, required_invites)
+
         await inter.response.send_message("⏳ Создаю розыгрыш...", ephemeral=True)
 
         channel = bot.get_channel(GIVEAWAY_CHANNEL_ID)
         if not channel:
             return await inter.edit_original_message(content="❌ Канал для розыгрышей не найден.")
 
-        msg = await channel.send(embeds=embeds)
+        # 👇 @everyone в content, эмбеды в embeds
+        msg = await channel.send(content="|| @everyone ||", embeds=embeds)
+
         cur.execute(
             """INSERT INTO giveaways
                (guild_id, channel_id, message_id, host_id, prize, description, winners_count,
@@ -408,6 +411,7 @@ class GiveawayModal(ui.Modal):
         bot.add_view(view, message_id=msg.id)
         await msg.edit(view=view)
         asyncio.create_task(schedule_end(gid))
+
         await inter.edit_original_message(content=f"✅ Розыгрыш создан! **ID: `{gid}`**")
         await log_discord(
             title="🎉 Создан розыгрыш",
@@ -575,14 +579,14 @@ async def finish_giveaway(gid: int):
         finished_embeds = build_finished_giveaway_embed(
             row["prize"], row["description"], len(participants), winners_mentions, end_dt
         )
+
+        # 👇 Финиш — БЕЗ пинга
         embed_msg = await channel.send(embeds=finished_embeds)
 
         cur.execute("UPDATE giveaways SET final_embed_id=? WHERE giveaway_id=?", (embed_msg.id, gid))
         db.commit()
 
-        # ============================================================
-        # ОТЧЁТ В ЛС — txt с УЧАСТНИКАМИ + красивый эмбед
-        # ============================================================
+        # Отчёт в ЛС
         await send_giveaway_report(
             gid=gid,
             prize=row["prize"],
@@ -592,9 +596,7 @@ async def finish_giveaway(gid: int):
             host_id=row["host_id"],
         )
 
-        # ============================================================
-        # ЛС УЧАСТНИКАМ
-        # ============================================================
+        # ЛС участникам
         prize_name = row["prize"]
         winner_ids = set(winners)
         for uid in participants:
@@ -640,7 +642,7 @@ async def finish_giveaway(gid: int):
         await log_discord("❌ Ошибка завершения розыгрыша", f"ID: {gid}\nОшибка: {e}", color=0xff0000)
 
 # ============================================================
-# ОТЧЁТ (txt + эмбед) В ЛС
+# ОТЧЁТ В ЛС
 # ============================================================
 async def send_giveaway_report(gid: int, prize: str, description: str,
                                 participants: list, winners: list, host_id: int):
@@ -651,7 +653,6 @@ async def send_giveaway_report(gid: int, prize: str, description: str,
         if not user:
             return
 
-        # Собираем txt: заголовок + участники
         lines = []
         lines.append(f"=== ОТЧЁТ ПО РОЗЫГРЫШУ #{gid} ===")
         lines.append(f"Приз: {prize}")
@@ -677,7 +678,6 @@ async def send_giveaway_report(gid: int, prize: str, description: str,
         file_data = io.BytesIO(content.encode("utf-8"))
         file = disnake.File(file_data, filename=f"report_giveaway_{gid}.txt")
 
-        # Красивый эмбед
         winners_mentions = " ".join(f"<@{u}>" for u in winners) if winners else "—"
         e1 = disnake.Embed(color=6776679)
         e1.set_image(url=IMG_STRIPE_GW)
@@ -754,7 +754,6 @@ async def reroll_giveaway(inter, gid: int):
     cur.execute("UPDATE giveaways SET final_embed_id=? WHERE giveaway_id=?", (embed_msg.id, gid))
     db.commit()
 
-    # Отчёт по рероллу тоже в ЛС
     await send_giveaway_report(
         gid=gid,
         prize=prize,
@@ -835,7 +834,7 @@ class RerollModal(ui.Modal):
         await reroll_giveaway(inter, gid)
 
 # ============================================================
-# ПАНЕЛЬ: СЕЛЕКТ
+# ПАНЕЛЬ: ГЛАВНЫЙ СЕЛЕКТ
 # ============================================================
 class GiveawaySelect(disnake.ui.StringSelect):
     def __init__(self):
@@ -908,47 +907,66 @@ class GiveawayPanelView(disnake.ui.View):
         self.add_item(GiveawaySelect())
 
 # ============================================================
-# ПАНЕЛЬ: ШАБЛОНЫ
+# ПАНЕЛЬ: ШАБЛОНЫ — СЕЛЕКТ, БЕЗ КАРТИНКИ
 # ============================================================
 async def show_templates_panel(inter: disnake.MessageInteraction):
-    e1 = disnake.Embed(color=6776679)
-    e1.set_image(url="https://cdn.discordapp.com/attachments/1527006158282555412/1539649602435682344/image.png?ex=6ab7dd6e&is=6ab68bee&hm=b98fbd2809973d1c63315659a842d8b87e3cab4d276bfc9c6079b27c87130f4d&")
-    e2 = disnake.Embed(
+    e = disnake.Embed(
         title="Шаблонные розыгрыши",
         description=(
             "> Выберите тип ниже, розыгрыш начнёт своё существование "
-            "после того, как вы нажмёте нужную кнопку.\n\n"
+            "сразу после выбора в селекте.\n\n"
             "> ⏱ **Длительность:** 1 день\n"
-            "> 🚫 **Инвайты:** не требуются\n"
-            "> 📊 Нажмите кнопку, чтобы запустить."
+            "> 🚫 **Инвайты:** не требуются"
         ),
         color=6776679
     )
-    e2.set_image(url=IMG_STRIPE_GW)
-
-    view = ui.View(timeout=120)
-    view.add_item(TemplateStartButton("150"))
-    view.add_item(TemplateStartButton("400"))
-    view.add_item(TemplateStartButton("600"))
-    view.add_item(TemplateStartButton("1000"))
-    await inter.response.send_message(embeds=[e1, e2], view=view, ephemeral=True)
+    e.set_image(url=IMG_STRIPE_GW)
+    await inter.response.send_message(embed=e, view=TemplateStartView(), ephemeral=True)
 
 
-class TemplateStartButton(ui.Button):
-    def __init__(self, key: str):
-        tpl = GIVEAWAY_TEMPLATES[key]
+class TemplateSelect(disnake.ui.StringSelect):
+    def __init__(self):
+        options = [
+            disnake.SelectOption(
+                label="150 DC · 1 победитель",
+                description="Стандартный розыгрыш",
+                value="150"
+            ),
+            disnake.SelectOption(
+                label="400 DC · 2 победителя",
+                description="Розыгрыш на двоих",
+                value="400"
+            ),
+            disnake.SelectOption(
+                label="600 DC · 3 победителя",
+                description="Розыгрыш на троих",
+                value="600"
+            ),
+            disnake.SelectOption(
+                label="1000 DC · 5 победителей",
+                description="Большой розыгрыш",
+                value="1000"
+            ),
+        ]
         super().__init__(
-            label=tpl["label"],
-            style=disnake.ButtonStyle.secondary,
-            custom_id=f"gwtpl_start_{key}",
+            placeholder="Выберите шаблон розыгрыша...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="giveaway_template_select"
         )
-        self.key = key
 
     async def callback(self, inter: disnake.MessageInteraction):
         if not is_giveaway_staff(inter.author):
             return await inter.response.send_message("⛔ У вас нет прав.", ephemeral=True)
 
-        tpl = GIVEAWAY_TEMPLATES[self.key]
+        key = inter.data.values[0]
+        if key not in GIVEAWAY_TEMPLATES:
+            return await inter.response.send_message("❌ Шаблон не найден.", ephemeral=True)
+
+        await inter.response.defer(ephemeral=True)
+
+        tpl = GIVEAWAY_TEMPLATES[key]
         prize = tpl["prize"]
         winners_count = tpl["winners"]
         description = tpl["description"]
@@ -959,14 +977,14 @@ class TemplateStartButton(ui.Button):
         end_time = int(end_dt_utc.timestamp())
         created_at = now_ts()
 
-        await inter.response.defer(ephemeral=True)
-
         channel = bot.get_channel(GIVEAWAY_CHANNEL_ID)
         if not channel:
-            return await inter.edit_original_message(content="❌ Канал для розыгрышей не найден.")
+            return await inter.edit_original_response(content="❌ Канал для розыгрышей не найден.")
 
         embeds = build_giveaway_embeds(prize, description, winners_count, 0, end_dt_utc, 0)
-        msg = await channel.send(embeds=embeds)
+
+        # 👇 @everyone + эмбеды
+        msg = await channel.send(content="|| @everyone ||", embeds=embeds)
 
         cur.execute(
             """INSERT INTO giveaways
@@ -983,8 +1001,11 @@ class TemplateStartButton(ui.Button):
         await msg.edit(view=view)
         asyncio.create_task(schedule_end(gid))
 
-        await inter.edit_original_message(
-            content=f"✅ Шаблонный розыгрыш **{prize}** создан! ID: `{gid}`\n> Канал: {channel.mention}"
+        # 👇 закрываем эфемерное сообщение шаблонов за собой
+        await inter.edit_original_response(
+            content=f"✅ Шаблонный розыгрыш **{prize}** создан! ID: `{gid}`",
+            embeds=[],
+            view=None,
         )
         await log_discord(
             title="🎉 Создан шаблонный розыгрыш",
@@ -997,6 +1018,12 @@ class TemplateStartButton(ui.Button):
             ),
             color=0x00ff00
         )
+
+
+class TemplateStartView(disnake.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.add_item(TemplateSelect())
 
 # ============================================================
 # СПИСОК РОЗЫГРЫШЕЙ
@@ -1071,7 +1098,7 @@ async def invites(inter: disnake.ApplicationCommandInteraction, user: disnake.Me
     await inter.send(embed=embed, ephemeral=True)
 
 # ============================================================
-# ОТПРАВКА ПАНЕЛИ В СТАФФ-КАНАЛ
+# ПАНЕЛЬ В СТАФФ-КАНАЛ
 # ============================================================
 async def send_giveaway_panel():
     try:
@@ -1082,7 +1109,6 @@ async def send_giveaway_panel():
             print("[PANEL] Канал панели не найден")
             return
 
-        # Удаляем старые панели розыгрышей
         try:
             async for msg in ch.history(limit=50):
                 if msg.author == bot.user and msg.embeds:
@@ -1138,7 +1164,6 @@ async def on_ready():
             )
         await sync_invites(guild)
 
-    # Активные розыгрыши → view + schedule
     active_rows = cur.execute("SELECT giveaway_id, message_id FROM giveaways WHERE status='active'").fetchall()
     for r in active_rows:
         gid = r["giveaway_id"]
@@ -1147,7 +1172,6 @@ async def on_ready():
         bot.add_view(view, message_id=msg_id)
         asyncio.create_task(schedule_end(gid))
 
-    # Панель в стафф-канал
     await send_giveaway_panel()
 
     await log_discord(
