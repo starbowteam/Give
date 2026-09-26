@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import os
-import time
 import disnake
 from disnake.ext import commands
 from disnake import ui
@@ -48,8 +47,20 @@ intents.guilds = True
 intents.invites = True
 intents.message_content = True
 
-bot = commands.InteractionBot(intents=intents)
 MSK = timezone(timedelta(hours=3))
+
+# ============================================================
+# БОТ (с setup_hook для глобальных вьюх)
+# ============================================================
+class GiveawayBot(commands.InteractionBot):
+    async def setup_hook(self):
+        # 👇 ГЛОБАЛЬНАЯ РЕГИСТРАЦИЯ PERSISTENT VIEWS
+        # Регистрируются один раз и работают для всех сообщений вечно
+        self.add_view(GiveawayView())         # кнопка "Участвовать"
+        self.add_view(GiveawayPanelView())    # селект в стафф-панели
+        print("[SETUP] Глобальные views зарегистрированы")
+
+bot = GiveawayBot(intents=intents)
 
 # ============================================================
 # БД
@@ -79,6 +90,9 @@ CREATE TABLE IF NOT EXISTS giveaways (
     valid_participants TEXT,
     final_embed_id     INTEGER
 );
+CREATE INDEX IF NOT EXISTS idx_giveaways_message ON giveaways(message_id);
+CREATE INDEX IF NOT EXISTS idx_giveaways_status  ON giveaways(status);
+
 CREATE TABLE IF NOT EXISTS invites (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id    INTEGER,
@@ -277,8 +291,8 @@ async def get_invite_stats(guild: disnake.Guild, user: disnake.Member, giveaway_
 # ============================================================
 # EMBED BUILDERS
 # ============================================================
-IMG_BANNER_GW = "https://cdn.discordapp.com/attachments/1527006158282555412/1529678932742508674/image.png?ex=6a62d005&is=6a617e85&hm=b524115aa4edc9de6ec5aad871f9a32c7ffe37c6d45b5da1718b2803d986bd52&"
-IMG_STRIPE_GW = "https://cdn.discordapp.com/attachments/1527006158282555412/1530795801268453447/pisk.png?ex=6a66e02f&is=6a658eaf&hm=79e41273327d2e1048ba42df62868cbb88f5b06b112ca864de2c7a02326523e9&"
+IMG_BANNER_GW  = "https://cdn.discordapp.com/attachments/1527006158282555412/1529678932742508674/image.png?ex=6a62d005&is=6a617e85&hm=b524115aa4edc9de6ec5aad871f9a32c7ffe37c6d45b5da1718b2803d986bd52&"
+IMG_STRIPE_GW  = "https://cdn.discordapp.com/attachments/1527006158282555412/1530795801268453447/pisk.png?ex=6a66e02f&is=6a658eaf&hm=79e41273327d2e1048ba42df62868cbb88f5b06b112ca864de2c7a02326523e9&"
 IMG_BANNER_FIN = "https://cdn.discordapp.com/attachments/1462418981825810535/1529721309880258660/image.png?ex=6a62f77d&is=6a61a5fd&hm=195de5a268f76548d304db161adc041513e051f0938fcb62588ccd6801e374b2&"
 
 def build_giveaway_embeds(prize, description, winners_count, participants_count, end_dt, required_invites=0):
@@ -313,6 +327,139 @@ def build_finished_giveaway_embed(prize, description, participants_count, winner
     embed_main = disnake.Embed(title="🎉 Розыгрыш завершён!", description=desc_text, color=6776679)
     embed_main.set_image(url=IMG_STRIPE_GW)
     return [embed_banner, embed_main]
+
+# ============================================================
+# ГЛАВНАЯ ПЕРСИСТЕНТНАЯ КНОПКА "УЧАСТВОВАТЬ"
+# ============================================================
+class JoinButton(disnake.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="ㅤㅤㅤㅤㅤㅤㅤㅤㅤㅤㅤ🎉 Участвоватьㅤㅤㅤㅤㅤㅤㅤㅤㅤㅤㅤ",
+            style=disnake.ButtonStyle.secondary,
+            custom_id="giveaway_join",  # 👈 ФИКСИРОВАННЫЙ — работает глобально
+        )
+
+    async def callback(self, inter: disnake.MessageInteraction):
+        try:
+            # 👇 Идентификация розыгрыша по ID сообщения (а не по self.gid)
+            row = cur.execute(
+                "SELECT * FROM giveaways WHERE message_id=? AND status='active'",
+                (inter.message.id,)
+            ).fetchone()
+            if not row:
+                return await inter.response.send_message(
+                    "❌ Розыгрыш не найден или уже завершён.", ephemeral=True
+                )
+
+            gid = row["giveaway_id"]
+            participants = list_from_str(row["participants"])
+            user_id = inter.user.id
+
+            if user_id in participants:
+                return await inter.response.send_message(
+                    "🎊 Вы уже участвуете в розыгрыше!", ephemeral=True
+                )
+
+            participants.append(user_id)
+            cur.execute(
+                "UPDATE giveaways SET participants=? WHERE giveaway_id=?",
+                (str_from_list(participants), gid)
+            )
+            db.commit()
+
+            end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
+            embeds = build_giveaway_embeds(
+                row["prize"], row["description"], row["winners_count"],
+                len(participants), end_dt, row["required_invites"]
+            )
+            try:
+                await inter.message.edit(embeds=embeds)
+            except Exception:
+                pass
+
+            await inter.response.send_message(
+                "✅ Ты успешно присоединился к розыгрышу!", ephemeral=True
+            )
+
+            embed_dm = disnake.Embed(
+                title="✅ Ты участвуешь в розыгрыше!",
+                description=(
+                    f"> **Приз:** {row['prize']}\n"
+                    f"> **ID розыгрыша:** `{gid}`\n"
+                    f"> **Участников:** {len(participants)}"
+                ),
+                color=0x00ff00
+            )
+            embed_dm.set_footer(text="Удачи! 🍀")
+            try:
+                await inter.user.send(embed=embed_dm)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[ERROR] JoinButton: {e}")
+            try:
+                await inter.response.send_message(
+                    "❌ Произошла ошибка. Попробуйте позже.", ephemeral=True
+                )
+            except Exception:
+                pass
+
+
+class GiveawayView(disnake.ui.View):
+    """Глобальная persistent view — регистрируется один раз в setup_hook."""
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(JoinButton())
+
+# ============================================================
+# СЕЛЕКТ ПАНЕЛИ (ПЕРСИСТЕНТНЫЙ)
+# ============================================================
+class GiveawaySelect(disnake.ui.StringSelect):
+    def __init__(self):
+        options = [
+            disnake.SelectOption(label="・Начать розыгрыш", description="Создать розыгрыш вручную",
+                                 emoji="<:__:1538399607699021895>", value="create"),
+            disnake.SelectOption(label="・Шаблонные розыгрыши", description="Готовые шаблоны DC-розыгрышей",
+                                 emoji="<:cakleb:1553236134316875846>", value="templates"),
+            disnake.SelectOption(label="・Лист розыгрышей", description="Все существующие розыгрыши",
+                                 emoji="<:banne1:1538551829246513312>", value="list"),
+            disnake.SelectOption(label="・Завершить принудительно", description="Принудительно завершить розыгрыш",
+                                 emoji="<:clear:1538561439491686410>", value="end"),
+            disnake.SelectOption(label="・Перевыбрать победителя", description="Перевыбрать победителя",
+                                 emoji="<:restart:1553231421190049813>", value="reroll"),
+        ]
+        super().__init__(placeholder="Выберите нужный пункт", min_values=1, max_values=1,
+                         options=options, custom_id="giveaway_select")
+
+    async def callback(self, inter: disnake.MessageInteraction):
+        if not is_giveaway_staff(inter.author):
+            return await inter.response.send_message("⛔ У вас нет прав.", ephemeral=True)
+
+        await log_discord(
+            title="🎮 Выбор в панели розыгрышей",
+            description=f"> **Пользователь:** {inter.author.mention}\n> **Выбрано:** `{inter.data.values[0]}`",
+            color=0x00aaff
+        )
+
+        value = inter.data.values[0]
+        if value == "create":
+            await inter.response.send_modal(GiveawayModal())
+        elif value == "templates":
+            await show_templates_panel(inter)
+        elif value == "list":
+            await inter.response.defer(ephemeral=True)
+            await list_giveaways(inter)
+        elif value == "end":
+            await inter.response.send_modal(EndGiveawayModal())
+        elif value == "reroll":
+            await inter.response.send_modal(RerollModal())
+
+
+class GiveawayPanelView(disnake.ui.View):
+    """Глобальная persistent view — регистрируется один раз в setup_hook."""
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(GiveawaySelect())
 
 # ============================================================
 # МОДАЛКА РУЧНОГО СОЗДАНИЯ
@@ -369,7 +516,8 @@ class GiveawayModal(ui.Modal):
         if not channel:
             return await inter.edit_original_message(content="❌ Канал для розыгрышей не найден.")
 
-        msg = await channel.send(content="|| @everyone ||", embeds=embeds)
+        # 👇 view передаётся с сообщением, но НЕ регистрируется повторно
+        msg = await channel.send(content="|| @everyone ||", embeds=embeds, view=GiveawayView())
 
         cur.execute(
             """INSERT INTO giveaways
@@ -381,9 +529,6 @@ class GiveawayModal(ui.Modal):
         )
         db.commit()
         gid = cur.lastrowid
-        view = GiveawayView(gid)
-        bot.add_view(view, message_id=msg.id)
-        await msg.edit(view=view)
         asyncio.create_task(schedule_end(gid))
 
         await inter.edit_original_message(content=f"✅ Розыгрыш создан! **ID: `{gid}`**")
@@ -398,70 +543,6 @@ class GiveawayModal(ui.Modal):
             ),
             color=0x00ff00
         )
-
-# ============================================================
-# VIEW РОЗЫГРЫША
-# ============================================================
-class GiveawayView(disnake.ui.View):
-    def __init__(self, gid: int):
-        super().__init__(timeout=None)
-        self.gid = gid
-        self.add_item(JoinButton(gid))
-
-class JoinButton(disnake.ui.Button):
-    def __init__(self, gid: int):
-        super().__init__(
-            label="ㅤㅤㅤㅤㅤㅤㅤㅤㅤㅤㅤ🎉 Участвоватьㅤㅤㅤㅤㅤㅤㅤㅤㅤㅤㅤ",
-            style=disnake.ButtonStyle.secondary,
-            custom_id=f"giveaway_join_{gid}",
-            row=0
-        )
-        self.gid = gid
-
-    async def callback(self, inter: disnake.MessageInteraction):
-        try:
-            row = cur.execute("SELECT * FROM giveaways WHERE giveaway_id=?", (self.gid,)).fetchone()
-            if not row or row["status"] != "active":
-                await inter.response.send_message("❌ Розыгрыш не найден или уже завершён.", ephemeral=True)
-                return
-
-            participants = list_from_str(row["participants"])
-            user_id = inter.user.id
-
-            if user_id in participants:
-                await inter.response.send_message("🎊 Вы уже участвуете в розыгрыше!", ephemeral=True)
-                return
-
-            participants.append(user_id)
-            cur.execute("UPDATE giveaways SET participants=? WHERE giveaway_id=?",
-                        (str_from_list(participants), self.gid))
-            db.commit()
-
-            end_dt = datetime.fromtimestamp(row["end_time"], timezone.utc)
-            embeds = build_giveaway_embeds(
-                row["prize"], row["description"], row["winners_count"],
-                len(participants), end_dt, row["required_invites"]
-            )
-            await inter.message.edit(embeds=embeds)
-            await inter.response.send_message("✅ Ты успешно присоединился к розыгрышу!", ephemeral=True)
-
-            embed_dm = disnake.Embed(
-                title="✅ Ты участвуешь в розыгрыше!",
-                description=(
-                    f"> **Приз:** {row['prize']}\n"
-                    f"> **ID розыгрыша:** `{self.gid}`\n"
-                    f"> **Участников:** {len(participants)}"
-                ),
-                color=0x00ff00
-            )
-            embed_dm.set_footer(text="Удачи! 🍀")
-            try:
-                await inter.user.send(embed=embed_dm)
-            except Exception:
-                pass
-        except Exception as e:
-            print(f"[ERROR] JoinButton: {e}")
-            await inter.response.send_message("❌ Произошла ошибка. Попробуйте позже.", ephemeral=True)
 
 # ============================================================
 # ВАЛИДНЫЕ УЧАСТНИКИ
@@ -546,10 +627,8 @@ async def finish_giveaway(gid: int):
         cur.execute("UPDATE giveaways SET final_embed_id=? WHERE giveaway_id=?", (embed_msg.id, gid))
         db.commit()
 
-        # 👇 ОТЧЁТ — только ID победителей
         await send_giveaway_report(gid=gid, prize=row["prize"], winners=winners)
 
-        # ЛС участникам
         prize_name = row["prize"]
         winner_ids = set(winners)
         for uid in participants:
@@ -564,7 +643,7 @@ async def finish_giveaway(gid: int):
                 )
                 embed_dm.add_field(
                     name="Что делать?",
-                    value="> В течение 24 часов отпишись в личные сообщения <@796293832751972352>, иначе приз будет разыгран другому участнику.",
+                    value=f"> В течение 24 часов отпишись в личные сообщения <@{REPORT_DM_USER_ID}>, иначе приз будет разыгран другому участнику.",
                     inline=False
                 )
                 embed_dm.set_footer(text="Поздравляем! 🏆")
@@ -598,7 +677,6 @@ async def finish_giveaway(gid: int):
 # ОТЧЁТ В ЛС — ТОЛЬКО ID ПОБЕДИТЕЛЕЙ
 # ============================================================
 async def send_giveaway_report(gid: int, prize: str, winners: list):
-    """Отправляет в ЛС txt с ID победителей (по одному на строку)."""
     try:
         user = bot.get_user(REPORT_DM_USER_ID)
         if not user:
@@ -606,11 +684,10 @@ async def send_giveaway_report(gid: int, prize: str, winners: list):
         if not user:
             return
 
-        # 👇 Только ID победителей, один на строку
-        content = "\n".join(str(uid) for uid in winners) if winners else ""
-        if not content:
-            content = ""
+        if not winners:
+            return
 
+        content = "\n".join(str(uid) for uid in winners)
         file_data = io.BytesIO(content.encode("utf-8"))
         file = disnake.File(file_data, filename=f"winners_{gid}.txt")
 
@@ -683,7 +760,6 @@ async def reroll_giveaway(inter, gid: int):
     cur.execute("UPDATE giveaways SET final_embed_id=? WHERE giveaway_id=?", (embed_msg.id, gid))
     db.commit()
 
-    # Отчёт — только ID победителей
     await send_giveaway_report(gid=gid, prize=row["prize"], winners=new_winners)
 
     for uid in new_winners:
@@ -696,7 +772,7 @@ async def reroll_giveaway(inter, gid: int):
             )
             embed_dm.add_field(
                 name="Что делать?",
-                value="> В течение 24 часов отпишись в личные сообщения <@796293832751972352>, иначе приз будет разыгран другому участнику.",
+                value=f"> В течение 24 часов отпишись в личные сообщения <@{REPORT_DM_USER_ID}>, иначе приз будет разыгран другому участнику.",
                 inline=False
             )
             embed_dm.set_footer(text="Поздравляем! 🏆")
@@ -748,54 +824,6 @@ class RerollModal(ui.Modal):
             return await inter.response.send_message("❌ ID должен быть числом.", ephemeral=True)
         await inter.response.defer(ephemeral=True)
         await reroll_giveaway(inter, gid)
-
-# ============================================================
-# ПАНЕЛЬ: ГЛАВНЫЙ СЕЛЕКТ
-# ============================================================
-class GiveawaySelect(disnake.ui.StringSelect):
-    def __init__(self):
-        options = [
-            disnake.SelectOption(label="・Начать розыгрыш", description="Создать розыгрыш вручную",
-                                 emoji="<:__:1538399607699021895>", value="create"),
-            disnake.SelectOption(label="・Шаблонные розыгрыши", description="Готовые шаблоны DC-розыгрышей",
-                                 emoji="<:cakleb:1553236134316875846>", value="templates"),
-            disnake.SelectOption(label="・Лист розыгрышей", description="Все существующие розыгрыши",
-                                 emoji="<:banne1:1538551829246513312>", value="list"),
-            disnake.SelectOption(label="・Завершить принудительно", description="Принудительно завершить розыгрыш",
-                                 emoji="<:clear:1538561439491686410>", value="end"),
-            disnake.SelectOption(label="・Перевыбрать победителя", description="Перевыбрать победителя",
-                                 emoji="<:restart:1553231421190049813>", value="reroll"),
-        ]
-        super().__init__(placeholder="Выберите нужный пункт", min_values=1, max_values=1,
-                         options=options, custom_id="giveaway_select")
-
-    async def callback(self, inter: disnake.MessageInteraction):
-        if not is_giveaway_staff(inter.author):
-            return await inter.response.send_message("⛔ У вас нет прав.", ephemeral=True)
-
-        await log_discord(
-            title="🎮 Выбор в панели розыгрышей",
-            description=f"> **Пользователь:** {inter.author.mention}\n> **Выбрано:** `{inter.data.values[0]}`",
-            color=0x00aaff
-        )
-
-        value = inter.data.values[0]
-        if value == "create":
-            await inter.response.send_modal(GiveawayModal())
-        elif value == "templates":
-            await show_templates_panel(inter)
-        elif value == "list":
-            await inter.response.defer(ephemeral=True)
-            await list_giveaways(inter)
-        elif value == "end":
-            await inter.response.send_modal(EndGiveawayModal())
-        elif value == "reroll":
-            await inter.response.send_modal(RerollModal())
-
-class GiveawayPanelView(disnake.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(GiveawaySelect())
 
 # ============================================================
 # ПАНЕЛЬ: ШАБЛОНЫ
@@ -851,7 +879,7 @@ class TemplateSelect(disnake.ui.StringSelect):
             return await inter.edit_original_response(content="❌ Канал не найден.")
 
         embeds = build_giveaway_embeds(prize, description, winners_count, 0, end_dt_utc, 0)
-        msg = await channel.send(content="|| @everyone ||", embeds=embeds)
+        msg = await channel.send(content="|| @everyone ||", embeds=embeds, view=GiveawayView())
 
         cur.execute(
             """INSERT INTO giveaways
@@ -863,9 +891,6 @@ class TemplateSelect(disnake.ui.StringSelect):
         )
         db.commit()
         gid = cur.lastrowid
-        view = GiveawayView(gid)
-        bot.add_view(view, message_id=msg.id)
-        await msg.edit(view=view)
         asyncio.create_task(schedule_end(gid))
 
         await inter.edit_original_response(
@@ -1021,13 +1046,16 @@ async def on_ready():
             )
         await sync_invites(guild)
 
-    active_rows = cur.execute("SELECT giveaway_id, message_id FROM giveaways WHERE status='active'").fetchall()
+    # 👇 ВАЖНО: view уже зарегистрированы глобально в setup_hook.
+    # Здесь только восстанавливаем планировщик для активных розыгрышей.
+    active_rows = cur.execute("SELECT giveaway_id, end_time FROM giveaways WHERE status='active'").fetchall()
     for r in active_rows:
         gid = r["giveaway_id"]
-        msg_id = r["message_id"]
-        view = GiveawayView(gid)
-        bot.add_view(view, message_id=msg_id)
-        asyncio.create_task(schedule_end(gid))
+        if r["end_time"] <= now_ts():
+            # Розыгрыш уже должен был завершиться — завершаем сразу
+            asyncio.create_task(finish_giveaway(gid))
+        else:
+            asyncio.create_task(schedule_end(gid))
 
     await send_giveaway_panel()
 
@@ -1037,5 +1065,6 @@ async def on_ready():
         color=0x00ff00
     )
     print(f"✅ Bot ready as {bot.user} | Активных: {len(active_rows)}")
+
 
 bot.run(TOKEN)
